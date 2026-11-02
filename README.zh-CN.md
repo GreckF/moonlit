@@ -17,7 +17,7 @@ moonlit 采用 **correct by construction（构造即正确）** 的写法：内�
 
 <p align="center"><img src="docs/cbc.svg" alt="非 CBC：check : Ctx → Expr → Type → Bool，infer : Ctx → Expr → Option Type。CBC：check : (Γ : Ctx) (t : Expr) (T : Type) → Option (Γ ⊢ t : T)，infer : (Γ : Ctx) (t : Expr) → Option ((T : Type) × (Γ ⊢ t : T))" width="760"></p>
 
-不带证书的检查器用 `Bool` 或一个单纯的类型作答；构造即正确的检查器用 `Γ ⊢ t : T` 的推导作答，或者
+不带证明的检查器用 `Bool` 或一个单纯的类型作答；构造即正确的检查器用 `Γ ⊢ t : T` 的推导作答，或者
 用类型和推导组成的对作答。在 moonlit 中，`Γ ⊢ t : T` 就是 `HasType(k, t, T)`（或 `InfType`），
 `Option` 是效应 `raise KernelError`，这个对就是 `TypeOf(k, t)`。
 
@@ -26,7 +26,7 @@ moonlit 采用 **correct by construction（构造即正确）** 的写法：内�
 - **内核能用。** 已实现类型推断、弱头规约、定义等价、归纳类型（互递归与嵌套，生成的递归子与导出
   文件中的逐一比对）、商类型以及 Nat/String 字面量。测试结果见下面的报告。
 - **构造即正确，但不是形式化验证。** 内核用到的宇宙层级运算，相对于层级的语义证明了正确；
-  弱头规约、定义等价和类型推断（两种模式，包括投影）返回证书（见[关于证明](#关于证明)）。归纳类型特有的检查（正性、宇宙约束、
+  弱头规约、定义等价和类型推断（两种模式，包括投影）返回证明（见[关于证明](#关于证明)）。归纳类型特有的检查（正性、宇宙约束、
   生成递归子）还没有证明。
 - 不支持 unsafe 归纳类型（直接拒绝）。partial 定义按 safe 定义检查；safe 声明不能使用 unsafe 或
   partial 声明。
@@ -53,10 +53,10 @@ moonlit 采用 **correct by construction（构造即正确）** 的写法：内�
    ```
 
    规则描述的是算法本身，而不是独立给出的 Lean 类型论。
-2. **带证书的结果。** 检查器返回依赖对：`RedTo(k, e)` 是一个项 `r` 加上 `Red(k, e, r)`；同样的还有
+2. **带证明的结果。** 检查器返回依赖对：`RedTo(k, e)` 是一个项 `r` 加上 `Red(k, e, r)`；同样的还有
    `EqTo`、`TypeOf(k, e)`（类型加 `HasType` 推导）、`InfOf`、`SortOf`、`PiOf`。判定返回
    `Check[P]`（`Holds(p)` 或 `Fail`），定义等价检查器的三值回答用 `DCheck[P]`。失败不带证明：只有
-   肯定的回答有证书，所以证书说明的是可靠性，不是完备性。
+   肯定的回答有证明，所以这些证明说明的是可靠性，不是完备性。
 3. **关于原语的事实。** 项是 arena 中做了 hash-consing 的整数，代码根据受信任的原语操作（`view`、
    环境查询、`instantiate1` 等）的结果分支。为了取得需要的等式，代码对 `inspect(x)` 做模式匹配：它
    返回 `x` 的值以及 `x === 该值` 的证明，`MkSing(VApp(f, a), ev)` 给出
@@ -64,12 +64,12 @@ moonlit 采用 **correct by construction（构造即正确）** 的写法：内�
    `Name::deq` / `Int::deq`。
 4. **缓存保存证明。** 各个缓存（whnf、类型推断、定义等价的 union-find）把结果连同推导和证明时的状态
    一起存下。查询时，只有 `ptr_deq` 证明状态相同、`Int::deq` 证明键相同之后才返回结果，所以缓存中的
-   答案与新算出的答案一样带证书。
+   答案与新算出的答案一样带证明。
 5. **用效应表示失败。** 错误是效应 `raise KernelError`。MoonBit++ 不允许返回证明的函数带有效应
    （证明会被擦除），所以这样的函数返回 `Check[P]`，由调用者抛出错误。
 6. **层级用语义。** 宇宙层级不只有规则，还有语义：`ev(l, rho)` 在参数的一个赋值下对层级求值，判定
    过程和各种化简都用结构递归的引理相对于它证明。
-7. **擦除。** 证明项在编译时被擦除，所以带证书的内核运行的算法与不带证书的内核相同。
+7. **擦除。** 证明项在编译时被擦除，所以带证明的内核运行的算法与不带证明的内核相同。
 
 因此这里的“构造即正确”是指：moonlit 接受的每个声明，都带有按上述规则得到的推导，说明其类型是一个
 类型、其值具有该类型；每次宇宙比较都带有相对于层级语义的证明。它不意味着这些规则就是 Lean 的类型论，
@@ -94,7 +94,7 @@ MoonBit++ Prelude 的运算直接计算字面量上的 `Nat.add` 等）：这些
 `Nat.add`、`Nat.sub`、`Nat.mul`、`Nat.pow`、`Nat.beq`、`Nat.ble` 的定义相等。`Nat.div`、
 `Nat.mod`、`Nat.gcd` 和位运算没有覆盖。
 
-证书，见 [`src/main/judgment.mbtpp`](src/main/judgment.mbtpp)（规则）和
+规约、定义等价与类型推断的证明，见 [`src/main/judgment.mbtpp`](src/main/judgment.mbtpp)（规则）和
 [`src/main/defeq.mbtpp`](src/main/defeq.mbtpp)：
 
 - `whnf` 返回结果 `r`，同时给出 `Red(k, e, r)` 的推导：`e` 经内核的规约步骤（β、ζ、δ、let 绑定的
@@ -112,12 +112,12 @@ MoonBit++ Prelude 的运算直接计算字面量上的 `Nat.add` 等）：这些
 - 投影的类型带有 `ProjType` 的推导：构造子的类型依次用参数和前面字段的投影实例化；若结构体可能是
   命题，还给出其被依赖的字段都是证明的推导。
 
-证书说明答案能由这些规则推出；它不说明这些规则就是 Lean 类型论的规则，也不说明规则中用到的原语是
+证明说明答案能由这些规则推出；它不说明这些规则就是 Lean 类型论的规则，也不说明规则中用到的原语是
 正确的。作为原语被信任的：arena 上的操作（`view`、`instantiate`、`mk_*`）、环境与局部上下文、展开
 定义、取构造子应用的字段、把递归子的规则用到构造子应用上、由 binder 体的类型构造 binder 的类型
 （`mk_pi_fvars`、`cheap_beta_reduce`）。作为单条规则被信任的：垃圾回收保留在用的项（`RCopy`）。
 
-证明在编译时被擦除，运行时没有开销（构造带证书的结果有一些分配开销）。原始类型的相等
+证明在编译时被擦除，运行时没有开销（构造带证明的结果有一些分配开销）。原始类型的相等
 （`String::deq`、`Int::deq`）和指针相等（`ptr_deq`）依赖 MoonBit++ Prelude 中的公理。
 
 ## 环境要求
@@ -161,12 +161,12 @@ bash scripts/arena_report.sh [每个测试的时限秒数]             # 每个�
 | `src/main/name.mbtpp`、`level.mbtpp` | 名字；宇宙层级 |
 | `src/main/level_proof.mbtpp` | 层级的语义；`≤` 的判定及其他层级运算，带证明 |
 | `src/main/nat_proof.mbtpp` | Lean 对被加速的 Nat 运算的定义，证明与内核所用的运算相等 |
-| `src/main/judgment.mbtpp` | 给内核的回答作证书的判断 `Red`、`DefEq`、`InfType` 和 `HasType` |
-| `src/main/defeq.mbtpp` | 定义等价，带证书 |
-| `src/main/check.mbtpp` | 两种模式的类型推断，带证书；声明的类型证书 |
+| `src/main/judgment.mbtpp` | 为内核的回答提供证明的判断 `Red`、`DefEq`、`InfType` 和 `HasType` |
+| `src/main/defeq.mbtpp` | 定义等价，带证明 |
+| `src/main/check.mbtpp` | 两种模式的类型推断，带证明；声明的类型证明 |
 | `src/main/expr.mbtpp` | 表达式：在 arena 中 hash-consing（相等与缓存都是 O(1)）；代换；按区域回收 |
 | `src/main/env.mbtpp` | 声明、环境、局部上下文 |
-| `src/main/tc.mbtpp` | whnf（带证书）、字面量、商类型与递归子的规约 |
+| `src/main/tc.mbtpp` | whnf（带证明）、字面量、商类型与递归子的规约 |
 | `src/main/inductive.mbtpp` | 归纳类型：检查、生成递归子、嵌套归纳类型 |
 | `src/main/decl.mbtpp` | 声明的检查；商类型 |
 | `src/main/loader.mbtpp` | 回放导出文件 |
