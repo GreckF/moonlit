@@ -10,16 +10,28 @@ and checks every declaration. The algorithms follow
 [lean4lean](https://github.com/digama0/lean4lean)
 ([paper](https://arxiv.org/abs/2403.14064)).
 
+moonlit is written **correct by construction**: the functions of the kernel
+do not return bare answers but answers together with the evidence for them.
+`whnf` returns the normal form with a derivation that the term reduces to it,
+`is_def_eq` answers *equal* only with a derivation of the equality, and type
+inference returns the type with a typing derivation. The result types are
+indexed by the inputs, so the type checker of MoonBit++ rejects any code path
+that produces an answer without its derivation. The derivations follow rules
+written down as inductive families (see
+[How it is formalized](#how-it-is-formalized)). The guarantee is only as
+strong as MoonBit++'s logic, which is inconsistent: see
+[About the proofs](#about-the-proofs).
+
 ## Status
 
 - **The kernel works.** Type inference, weak head normalization,
   definitional equality, inductive types (mutual and nested, with generated
   recursors checked against the exported ones), quotients and Nat/String
   literals are implemented. See the test report below.
-- **Part of it carries proofs, which are not a formal verification.** The
-  universe level operations the kernel uses are proved correct against a
-  semantics of levels, and weak head normalization, definitional equality
-  and type checking return certificates (see
+- **Correct by construction, but not formally verified.** The universe
+  level operations the kernel uses are proved correct against a semantics of
+  levels, and weak head normalization, definitional equality and type
+  inference (both modes, projections included) return certificates (see
   [About the proofs](#about-the-proofs)). The checks specific to inductive
   types (positivity, universe constraints, recursor generation) have no
   proofs yet.
@@ -38,7 +50,62 @@ and checks every declaration. The algorithms follow
 > use of `Type : Type`), but nothing enforces this. Read them as an extra
 > layer of assurance on top of testing, not as formal verification.
 
-What is proved:
+### How it is formalized
+
+1. **Judgments as inductive families.** The judgments are `Prop`-valued
+   inductive families indexed by the kernel state `k : K` (arena,
+   environment, local context) and by terms: `Red(k, a, b)` (reduction),
+   `DefEq(k, a, b)` (definitional equality), `HasType(k, e, t)` (typing in
+   checking mode), `InfType(k, e, t)` (typing in inference mode),
+   `ProjType`, `IsProp`, and for levels `LevelLE(a, b)`. Each constructor is
+   one step of lean4lean's algorithm, with its side conditions as premises,
+   for example
+
+   ```
+   TApp(view(k, e) === VApp(f, a), HasType(k, f, ft), Red(k, ft, p),
+        view(k, p) === VPi(n, dom, body, bi), HasType(k, a, at),
+        DefEq(k, dom, at)) : HasType(k, e, instantiate1(k, body, a))
+   ```
+
+   The rules describe the algorithm; they are not an independent
+   presentation of Lean's type theory.
+2. **Certified results.** The checker returns dependent pairs: `RedTo(k, e)`
+   is a term `r` with `Red(k, e, r)`; likewise `EqTo`, `TypeOf(k, e)` (a type
+   with a `HasType` derivation), `InfOf`, `SortOf`, `PiOf`. Decisions return
+   `Check[P]` (`Holds(p)` or `Fail`), or `DCheck[P]` for the three-valued
+   answers of the definitional equality checker. A failure carries no proof:
+   only positive answers are certified, so the certificates speak to
+   soundness, not completeness.
+3. **Facts about primitives.** Terms are hash-consed integers in an arena,
+   and the code branches on the results of trusted primitive operations
+   (`view`, environment lookups, `instantiate1`, ...). To obtain the equation
+   it needs, the code matches on `inspect(x)`, which returns the value of `x`
+   together with a proof of `x === value`: `MkSing(VApp(f, a), ev)` gives
+   `ev : view(k, e) === VApp(f, a)`. Boolean tests use `reflect`; equalities
+   of names and integers use the proof-producing `Name::deq` / `Int::deq`.
+4. **Caches keep the proofs.** The caches (whnf, inference, the union-find of
+   definitional equality) store results together with their derivations and
+   the state they were proved in. A lookup returns a result only after
+   `ptr_deq` shows that the state is the same and `Int::deq` that the key is
+   the same, so a cached answer is as certified as a fresh one.
+5. **Effects for failure.** Errors are the effect `raise KernelError`.
+   MoonBit++ forbids effects in functions that return proofs (proofs are
+   erased), so such functions return `Check[P]` and the caller raises.
+6. **Levels by semantics.** Universe levels have a semantics, not only
+   rules: `ev(l, rho)` evaluates a level under an assignment of its
+   parameters, and the decision procedure and the simplifications are proved
+   against it with structurally recursive lemmas.
+7. **Erasure.** Proof terms are erased when compiling, so the certified
+   kernel runs the same algorithm as an uncertified one would.
+
+So "correct by construction" means here: every declaration moonlit accepts
+comes with derivations, by the rules above, that its type is a type and that
+its value has that type, and every universe comparison comes with a proof
+against the semantics of levels. It does not mean that the rules are Lean's
+type theory, that the trusted primitives are correct, or that a rejection is
+justified, and it inherits the inconsistency of MoonBit++.
+
+### What is proved
 
 In [`src/main/level_proof.mbtpp`](src/main/level_proof.mbtpp), about universe
 levels:
