@@ -48,15 +48,16 @@ MoonBit++ Prelude 的运算直接计算字面量上的 `Nat.add` 等）：这些
 [`src/main/defeq.mbtpp`](src/main/defeq.mbtpp)：
 
 - `whnf` 返回结果 `r`，同时给出 `Red(k, e, r)` 的推导：`e` 经内核的规约步骤（β、ζ、δ、let 绑定的
-  变量、投影、Nat 字面量、字符串字面量）规约到 `r`；
+  变量、投影、递归子的 ι 规约、商类型、Nat 字面量、字符串字面量）规约到 `r`；ι 规约时，主前提经规约、
+  字面量展开、K-like 规约或结构体 η 变成构造子应用，每一步都带推导；
 - `is_def_eq` 每次回答“相等”时，都给出按算法规则推出 `DefEq(k, t, s)` 的推导（同余、在新变量下比较
   binder、用已证明的层级等价比较 sort、η、结构体 η、证明无关、unit-like 类型、Nat 字面量）；union-find
   和其他缓存中存的也是带推导的结果。
 
 证书说明答案能由这些规则推出；它不说明这些规则就是 Lean 类型论的规则，也不说明规则中用到的原语是
 正确的。作为原语被信任的：arena 上的操作（`view`、`instantiate`、`mk_*`）、环境与局部上下文、展开
-定义、取构造子应用的字段。目前作为单条规则被信任的：递归子与商类型的规约（`RRec`）、定义等价中用到
-的类型推断（η、结构体 η、证明无关、unit-like 类型），以及垃圾回收保留在用的项（`RCopy`）。
+定义、取构造子应用的字段、把递归子的规则用到构造子应用上。目前作为单条规则被信任的：规则中用到的
+类型推断（η、结构体 η、证明无关、unit-like 类型、K-like 规约），以及垃圾回收保留在用的项（`RCopy`）。
 
 证明在编译时被擦除，运行时没有开销（构造带证书的结果有一些分配开销）。原始类型的相等
 （`String::deq`、`Int::deq`）和指针相等（`ptr_deq`）依赖 MoonBit++ Prelude 中的公理。
@@ -124,16 +125,16 @@ bash scripts/arena_report.sh [每个测试的时限秒数]             # 每个�
 
 | 类别 | 通过 | 总数 | 耗时（秒） |
 | --- | --- | --- | --- |
-| `bad/bugs` | 26 | 26 | 8.8 |
-| `bad/other` | 5 | 5 | 1.5 |
-| `bad/perf` | 2 | 2 | 1.2 |
-| `bad/tutorial` | 47 | 47 | 13.7 |
-| `good/corner-cases` | 1 | 1 | 0.3 |
-| `good/init-prelude.ndjson` | 1 | 1 | 1.5 |
-| `good/other` | 5 | 5 | 1.5 |
-| `good/perf` | 22 | 26 | 320.6 |
-| `good/tutorial` | 94 | 94 | 27.5 |
-| **合计** | **203** | **207** | 376.6 |
+| `bad/bugs` | 26 | 26 | 8.5 |
+| `bad/other` | 5 | 5 | 1.2 |
+| `bad/perf` | 2 | 2 | 1.1 |
+| `bad/tutorial` | 47 | 47 | 13.5 |
+| `good/corner-cases` | 1 | 1 | 0.2 |
+| `good/init-prelude.ndjson` | 1 | 1 | 1.7 |
+| `good/other` | 5 | 5 | 1.3 |
+| `good/perf` | 22 | 26 | 323.9 |
+| `good/tutorial` | 94 | 94 | 19.8 |
+| **合计** | **203** | **207** | 371.2 |
 
 失败的测试（都是 60 秒超时）：
 
@@ -144,8 +145,8 @@ bash scripts/arena_report.sh [每个测试的时限秒数]             # 每个�
 | `good/perf/magma-list-deep-n36` | 没有测试超过 60 秒的情况 |
 | `good/perf/magma-list-pair-n21` | 400 秒内没有跑完 |
 
-通过的测试中最慢的：`magma-list-pair-n7` 42.5 秒，`beta-ladder` 12.9 秒，`grind-ring-5`
-11.2 秒，`let-ladder` 5.6 秒；其余都在 2 秒以内（`init-prelude` 1.5 秒）。
+通过的测试中最慢的：`magma-list-pair-n7` 31.5 秒，`grind-ring-5` 18.5 秒，`beta-ladder`
+14.1 秒，`let-ladder` 8.1 秒；其余都在 2 秒以内（`init-prelude` 1.7 秒）。
 
 `magma-list` 系列检查的是一个 `decide` 证明：在 `Fin n` 上穷举一个 5 变量的 magma 等式；
 `app-lam` 还没有剖析。让这几个测试变快是接下来的工作。

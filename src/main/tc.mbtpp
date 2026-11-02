@@ -599,13 +599,12 @@ fn whnf_app_c(k : K, e : Expr, cheap_proj : Bool) -> RedTo(k, e) raise KernelErr
                   }
                 }
                 IsFalse(_) =>
-                  match inspect(rec_reduct(k, e)) {
-                    MkSing(Ok(Some(r1)), er) =>
+                  match reduce_recursor_c(k, e) {
+                    Some(MkRedTo(r1, p1)) =>
                       match whnf_core_pc(k, r1, cheap_proj) {
-                        MkRedTo(r, p) => MkRedTo(r, RTrans(RRec(er), p))
+                        MkRedTo(r, p) => MkRedTo(r, RTrans(p1, p))
                       }
-                    MkSing(Ok(None), _) => MkRedTo(e, RRefl)
-                    MkSing(Err(err), _) => raise err
+                    None => MkRedTo(e, RRefl)
                   }
               }
             No(_) => {
@@ -665,15 +664,6 @@ fn reduce_proj_c(k : K, idx : Int, s : Expr, cheap_proj : Bool) -> ProjRes(k, id
   }
 }
 
-fn reduce_recursor(k : K, e : Expr) -> Expr? raise KernelError {
-  if k.env.quot_init {
-    match quot_reduce_rec(k, e) {
-      Some(r) => return Some(r)
-      None => ()
-    }
-  }
-  inductive_reduce_rec(k, e)
-}
 
 // The definition a constant head can be unfolded to.
 fn is_delta(k : K, e : Expr) -> ConstInfo? {
@@ -985,30 +975,56 @@ fn is_nat_succ_of(k : K, t : Expr) -> Expr? {
 
 // ---- quotients ---------------------------------------------------------------------------
 
-fn quot_reduce_rec(k : K, e : Expr) -> Expr? raise KernelError {
+// the `Quot.mk` argument of `Quot.lift f h q ...` or `Quot.ind p q ...`
+fn quot_major(k : K, e : Expr) -> Expr? {
   let f = get_app_fn(k, e)
-  let (mk_pos, arg_pos) = if is_const_of(k, f, k.names.quot_lift) {
-    (5, 3)
+  let pos = if is_const_of(k, f, k.names.quot_lift) {
+    5
   } else if is_const_of(k, f, k.names.quot_ind) {
-    (4, 3)
+    4
   } else {
     return None
   }
   let args = get_app_args(k, e)
-  if mk_pos >= args.length() {
+  if pos < args.length() { Some(args[pos]) } else { None }
+}
+
+// `Quot.lift f h (Quot.mk r a) ...` is `f a ...`, `Quot.ind p (Quot.mk r a) ...` is `p a ...`
+fn quot_apply(k : K, e : Expr, mk : Expr) -> Expr? {
+  let f = get_app_fn(k, e)
+  let pos = if is_const_of(k, f, k.names.quot_lift) {
+    5
+  } else if is_const_of(k, f, k.names.quot_ind) {
+    4
+  } else {
     return None
   }
-  let mk = whnf(k, args[mk_pos])
-  if not(is_const_of(k, get_app_fn(k, mk), k.names.quot_mk) && get_app_num_args(k, mk) == 3) {
+  let args = get_app_args(k, e)
+  if pos >= args.length() || not(is_const_of(k, get_app_fn(k, mk), k.names.quot_mk) && get_app_num_args(k, mk) == 3) {
     return None
   }
-  let r = mk_app(k, args[arg_pos], app_arg(k, mk))
-  Some(mk_app_range(k, r, args, mk_pos + 1, args.length()))
+  let r = mk_app(k, args[3], app_arg(k, mk))
+  Some(mk_app_range(k, r, args, pos + 1, args.length()))
+}
+
+fn quot_reduce_c(k : K, e : Expr) -> RedTo(k, e)? raise KernelError {
+  match inspect(quot_major(k, e)) {
+    MkSing(Some(m), em) =>
+      match whnf_c(k, m) {
+        MkRedTo(mk, pm) =>
+          match inspect(quot_apply(k, e, mk)) {
+            MkSing(Some(r), er) => Some(MkRedTo(r, RQuot(em, pm, er)))
+            MkSing(None, _) => None
+          }
+      }
+    MkSing(None, _) => None
+  }
 }
 
 // ---- inductive types ---------------------------------------------------------------------
 
 fn rec_major_idx(k : K, rv : RecVal) -> Int {
+  ignore(k)
   rv.nparams + rv.nmotives + rv.nminors + rv.nindices
 }
 
@@ -1021,6 +1037,34 @@ fn rec_major_induct(k : K, ci : ConstInfo, rv : RecVal) -> Name {
   match const_name(k, get_app_fn(k, binding_domain(k, t))) {
     Some(n) => n
     None => Anon
+  }
+}
+
+// the recursor at the head of `e`
+fn rec_info(k : K, e : Expr) -> (ConstInfo, RecVal)? {
+  match const_name(k, get_app_fn(k, e)) {
+    Some(n) =>
+      match env_find(k, n) {
+        Some(ci) =>
+          match ci.kind {
+            CRec(rv) => Some((ci, rv))
+            _ => None
+          }
+        None => None
+      }
+    None => None
+  }
+}
+
+// the major premise of a recursor application
+fn rec_major(k : K, e : Expr) -> Expr? {
+  match rec_info(k, e) {
+    Some((_, rv)) => {
+      let args = get_app_args(k, e)
+      let i = rec_major_idx(k, rv)
+      if i < args.length() { Some(args[i]) } else { None }
+    }
+    None => None
   }
 }
 
@@ -1040,14 +1084,62 @@ fn mk_nullary_ctor(k : K, type_ : Expr, nparams : Int) -> Expr? {
   }
 }
 
-fn to_ctor_when_k(k : K, rv : RecVal, major_induct : Name, e : Expr) -> Expr raise KernelError {
-  let app_type = whnf(k, infer_type(k, e))
-  if not(is_const_of(k, get_app_fn(k, app_type), major_induct)) {
-    return e
+// the type is an inductive type whose recursor has K-like reduction
+fn k_target_type(k : K, t : Expr) -> Bool {
+  match const_name(k, get_app_fn(k, t)) {
+    Some(i) =>
+      match env_find(k, mk_rec_name(k, i)) {
+        Some({ kind: CRec(rv), .. }) => rv.k
+        _ => false
+      }
+    None => false
   }
-  match mk_nullary_ctor(k, app_type, rv.nparams) {
-    Some(c) => if is_def_eq(k, app_type, infer_type(k, c)) { c } else { e }
-    None => e
+}
+
+// the type is a non-recursive structure
+fn struct_type(k : K, t : Expr) -> Bool {
+  match const_name(k, get_app_fn(k, t)) {
+    Some(i) =>
+      match env_find_induct(k, i) {
+        Some(iv) => is_structure_like(k, i) && not(iv.is_rec)
+        None => false
+      }
+    None => false
+  }
+}
+
+fn sort_never_zero(k : K, s : Expr) -> Bool {
+  is_sort(k, s) && sort_level(k, s).is_never_zero()
+}
+
+// K-like reduction: the major premise as the nullary constructor
+fn to_ctor_when_k_c(k : K, major_induct : Name, np : Int, m : Expr) -> EqTo(k, m) raise KernelError {
+  match inspect(infer_oracle(k, m)) {
+    MkSing(Ok(ty), ei) =>
+      match whnf_c(k, ty) {
+        MkRedTo(tyn, pr) => {
+          if not(is_const_of(k, get_app_fn(k, tyn), major_induct)) {
+            return MkEqTo(m, DRefl)
+          }
+          match reflect(k_target_type(k, tyn)) {
+            IsTrue(hk) =>
+              match inspect(mk_nullary_ctor(k, tyn, np)) {
+                MkSing(Some(c), ec) =>
+                  match inspect(infer_oracle(k, c)) {
+                    MkSing(Ok(cty), eci) =>
+                      match is_def_eq_c(k, tyn, cty) {
+                        Holds(q) => MkEqTo(c, DKLike(ei, pr, hk, ec, eci, q))
+                        Fail => MkEqTo(m, DRefl)
+                      }
+                    MkSing(Err(err), _) => raise err
+                  }
+                MkSing(None, _) => MkEqTo(m, DRefl)
+              }
+            IsFalse(_) => MkEqTo(m, DRefl)
+          }
+        }
+      }
+    MkSing(Err(err), _) => raise err
   }
 }
 
@@ -1084,23 +1176,41 @@ fn expand_eta_struct(k : K, etype : Expr, e : Expr) -> Expr {
   }
 }
 
-fn to_ctor_when_struct(k : K, induct : Name, e : Expr) -> Expr raise KernelError {
+// structure η on the major premise: the constructor applied to its projections
+fn to_ctor_when_struct_c(k : K, induct : Name, e : Expr) -> EqTo(k, e) raise KernelError {
   if not(is_structure_like(k, induct)) || is_constructor_app(k, e) {
-    return e
+    return MkEqTo(e, DRefl)
   }
   match env_find_induct(k, induct) {
-    Some(iv) => if iv.is_rec { return e }
-    None => return e
+    Some(iv) => if iv.is_rec { return MkEqTo(e, DRefl) }
+    None => return MkEqTo(e, DRefl)
   }
-  let etype = whnf(k, infer_type(k, e))
-  if not(is_const_of(k, get_app_fn(k, etype), induct)) {
-    return e
+  match inspect(infer_oracle(k, e)) {
+    MkSing(Ok(ty), e1) =>
+      match whnf_c(k, ty) {
+        MkRedTo(tyn, pr) => {
+          if not(is_const_of(k, get_app_fn(k, tyn), induct)) {
+            return MkEqTo(e, DRefl)
+          }
+          match reflect(struct_type(k, tyn)) {
+            IsTrue(hs) =>
+              match inspect(infer_oracle(k, tyn)) {
+                MkSing(Ok(sty), e2) =>
+                  match whnf_c(k, sty) {
+                    MkRedTo(styn, ps) =>
+                      match reflect(sort_never_zero(k, styn)) {
+                        IsTrue(hz) => MkEqTo(expand_eta_struct(k, tyn, e), DEtaExp(e1, pr, hs, e2, ps, hz))
+                        IsFalse(_) => MkEqTo(e, DRefl)
+                      }
+                  }
+                MkSing(Err(err), _) => raise err
+              }
+            IsFalse(_) => MkEqTo(e, DRefl)
+          }
+        }
+      }
+    MkSing(Err(err), _) => raise err
   }
-  let s = whnf(k, infer_type(k, etype))
-  if not(sort_level(k, s).is_never_zero()) {
-    return e
-  }
-  expand_eta_struct(k, etype, e)
 }
 
 fn get_rec_rule(k : K, rv : RecVal, major : Expr) -> RecRule? {
@@ -1119,45 +1229,26 @@ fn get_rec_rule(k : K, rv : RecVal, major : Expr) -> RecRule? {
   }
 }
 
-fn inductive_reduce_rec(k : K, e : Expr) -> Expr? raise KernelError {
-  let f = get_app_fn(k, e)
-  let (rname, ls) = match view(k, f) {
-    VConst(n, ls) => (n, ls)
-    _ => return None
-  }
-  let ci = match env_find(k, rname) {
-    Some(ci) => ci
+// the reduct of the recursor application `e` whose major premise is the
+// constructor application `c`
+fn iota_apply(k : K, e : Expr, c : Expr) -> Expr? {
+  let (ci, rv) = match rec_info(k, e) {
+    Some(r) => r
     None => return None
   }
-  let rv = match ci.kind {
-    CRec(rv) => rv
-    _ => return None
-  }
+  let f = get_app_fn(k, e)
+  let ls = const_levels(k, f)
   let rec_args = get_app_args(k, e)
   let major_idx = rec_major_idx(k, rv)
   if major_idx >= rec_args.length() {
     return None
   }
-  let major_induct = rec_major_induct(k, ci, rv)
-  let mut major = rec_args[major_idx]
-  if rv.k {
-    major = to_ctor_when_k(k, rv, major_induct, major)
-  }
-  let mw = whnf(k, major)
-  major = match view(k, mw) {
-    VNatLit(n) => nat_lit_to_ctor(k, n)
-    VStrLit(s) => whnf(k, str_lit_to_ctor(k, s))
-    _ => to_ctor_when_struct(k, major_induct, mw)
-  }
-  let rule = match get_rec_rule(k, rv, major) {
+  let rule = match get_rec_rule(k, rv, c) {
     Some(r) => r
     None => return None
   }
-  let major_args = get_app_args(k, major)
-  if rule.nfields > major_args.length() {
-    return None
-  }
-  if list_length(ls) != ci.num_lparams(k) {
+  let major_args = get_app_args(k, c)
+  if rule.nfields > major_args.length() || list_length(ls) != ci.num_lparams(k) {
     return None
   }
   let mut rhs = match k.tc.rule_c.get((f, rule.rhs)) {
@@ -1171,9 +1262,64 @@ fn inductive_reduce_rec(k : K, e : Expr) -> Expr? raise KernelError {
   }
   rhs = mk_app_range(k, rhs, rec_args, 0, rv.nparams + rv.nmotives + rv.nminors)
   rhs = mk_app_range(k, rhs, major_args, major_args.length() - rule.nfields, major_args.length())
-  bump(k, ST_IOTA)
   if major_idx + 1 < rec_args.length() {
     rhs = mk_app_range(k, rhs, rec_args, major_idx + 1, rec_args.length())
   }
   Some(rhs)
+}
+
+// ι-reduction: bring the major premise to a constructor application (K-like
+// reduction, weak head normalization, literals, structure η), then apply the
+// rule of the constructor
+fn inductive_reduce_c(k : K, e : Expr) -> RedTo(k, e)? raise KernelError {
+  match inspect(rec_major(k, e)) {
+    MkSing(Some(m0), em) => {
+      let (ci, rv) = match rec_info(k, e) {
+        Some(r) => r
+        None => return None
+      }
+      let major_induct = rec_major_induct(k, ci, rv)
+      let k1 : EqTo(k, m0) = if rv.k {
+        to_ctor_when_k_c(k, major_induct, rv.nparams, m0)
+      } else {
+        MkEqTo(m0, DRefl)
+      }
+      match k1 {
+        MkEqTo(m1, p1) =>
+          match whnf_c(k, m1) {
+            MkRedTo(mw, pw) => {
+              let conv : EqTo(k, mw) = match inspect(view(k, mw)) {
+                MkSing(VNatLit(n), ev) => MkEqTo(nat_lit_to_ctor(k, n), DRed(RNatLit(ev)))
+                MkSing(VStrLit(str), ev) =>
+                  match whnf_c(k, str_lit_to_ctor(k, str)) {
+                    MkRedTo(c2, p2) => MkEqTo(c2, DRed(RTrans(RStrLit(ev), p2)))
+                  }
+                MkSing(_, _) => to_ctor_when_struct_c(k, major_induct, mw)
+              }
+              match conv {
+                MkEqTo(c, pc) =>
+                  match inspect(iota_apply(k, e, c)) {
+                    MkSing(Some(r), er) => {
+                      bump(k, ST_IOTA)
+                      Some(MkRedTo(r, RIota(em, DTrans(p1, DTrans(DRed(pw), pc)), er)))
+                    }
+                    MkSing(None, _) => None
+                  }
+              }
+            }
+          }
+      }
+    }
+    MkSing(None, _) => None
+  }
+}
+
+fn reduce_recursor_c(k : K, e : Expr) -> RedTo(k, e)? raise KernelError {
+  if k.env.quot_init {
+    match quot_reduce_c(k, e) {
+      Some(r) => return Some(r)
+      None => ()
+    }
+  }
+  inductive_reduce_c(k, e)
 }

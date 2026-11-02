@@ -10,8 +10,8 @@
 // are only added to the arena, except by a collection, which keeps the nodes
 // still in use; a fact `view(k, e) === v` about a node in use stays true.
 //
-// Trusted rules, to be refined: `RRec` (recursor and quotient reduction, as
-// computed by `reduce_recursor`) and `RCopy` (a collection copies the term).
+// Trusted rule: `RCopy` (a collection copies the term). Type inference is
+// trusted where the rules use it (`infer_oracle`, `prop_oracle`).
 //
 // As everywhere in moonlit, the proofs are checked by MoonBit++, whose logic
 // is inconsistent: see the README.
@@ -55,8 +55,21 @@ enum Red : (K, Expr, Expr) -> Prop {
     nat_lit_value(k, lb) === Some(vb),
     nat_bin_op(k, fname, va, vb) === Some(r),
   ) : Red(k, e, r)
-  // trusted: recursor and quotient reduction
-  RRec[k : K, e : Expr, r : Expr](rec_reduct(k, e) === Ok(Some(r))) : Red(k, e, r)
+  // ι: a recursor whose major premise is equal to a constructor application
+  // `c` reduces by the rule of the constructor
+  RIota[k : K, e : Expr, m : Expr, c : Expr, r : Expr](
+    rec_major(k, e) === Some(m),
+    DefEq(k, m, c),
+    iota_apply(k, e, c) === Some(r),
+  ) : Red(k, e, r)
+  // `Quot.lift f h (Quot.mk r a)` and `Quot.ind`
+  RQuot[k : K, e : Expr, m : Expr, mk : Expr, r : Expr](
+    quot_major(k, e) === Some(m),
+    Red(k, m, mk),
+    quot_apply(k, e, mk) === Some(r),
+  ) : Red(k, e, r)
+  // a Nat literal is `Nat.zero` or `Nat.succ` of a literal
+  RNatLit[k : K, e : Expr, n : Nat](view(k, e) === VNatLit(n)) : Red(k, e, nat_lit_to_ctor(k, n))
   // trusted: a collection copies the term it keeps
   RCopy[k : K, t : Expr, mark : Int, lmark : Int] : Red(k, t, gc_region(k, mark, lmark, t))
 }
@@ -89,15 +102,6 @@ fn proj_field(k : K, i : Int, c : Expr) -> Expr? {
         None => None
       }
     None => None
-  }
-}
-
-// recursor and quotient reduction, with its errors as a value
-fn rec_reduct(k : K, e : Expr) -> Result[Option[Expr], KernelError] {
-  try {
-    Ok(reduce_recursor(k, e))
-  } catch {
-    KernelError(msg) => Err(KernelError(msg))
   }
 }
 
@@ -298,6 +302,27 @@ enum DefEq : (K, Expr, Expr) -> Prop {
     infer_oracle(k, s) === Ok(q),
     DefEq(k, p, q),
   ) : DefEq(k, t, s)
+  // K-like types: a proof of an inductive proposition with one constructor
+  // without fields is that constructor (applied to the parameters), when
+  // their types are equal
+  DKLike[k : K, m : Expr, ty : Expr, tyn : Expr, np : Int, c : Expr, cty : Expr](
+    infer_oracle(k, m) === Ok(ty),
+    Red(k, ty, tyn),
+    k_target_type(k, tyn) === true,
+    mk_nullary_ctor(k, tyn, np) === Some(c),
+    infer_oracle(k, c) === Ok(cty),
+    DefEq(k, tyn, cty),
+  ) : DefEq(k, m, c)
+  // structure η: a term of a structure (not a proposition) is the
+  // constructor applied to its projections
+  DEtaExp[k : K, m : Expr, ty : Expr, tyn : Expr, sty : Expr, styn : Expr](
+    infer_oracle(k, m) === Ok(ty),
+    Red(k, ty, tyn),
+    struct_type(k, tyn) === true,
+    infer_oracle(k, tyn) === Ok(sty),
+    Red(k, sty, styn),
+    sort_never_zero(k, styn) === true,
+  ) : DefEq(k, m, expand_eta_struct(k, tyn, m))
   // two terms of a unit-like type
   DUnit[k : K, t : Expr, s : Expr, ty : Expr, tyn : Expr, sy : Expr](
     infer_oracle(k, t) === Ok(ty),

@@ -67,7 +67,10 @@ rules) and [`src/main/defeq.mbtpp`](src/main/defeq.mbtpp):
 
 - `whnf` returns its result `r` together with a derivation of `Red(k, e, r)`:
   `e` reduces to `r` by the kernel's reduction steps (β, ζ, δ, let-bound
-  variables, projections, Nat literals, string literals);
+  variables, projections, ι-reduction of recursors, quotients, Nat literals,
+  string literals); for ι-reduction, the major premise is brought to a
+  constructor application by reduction, literal unfolding, K-like reduction
+  or structure η, each with its derivation;
 - `is_def_eq` returns, whenever it answers *equal*, a derivation of
   `DefEq(k, t, s)` by the rules of the algorithm (congruence, binders compared
   under a fresh variable, sorts by the proved level equivalence, η, structure
@@ -78,10 +81,11 @@ A certificate shows that the answer follows from the rules; it does not show
 that the rules are those of Lean's type theory, nor that the primitives used
 in them are correct. Trusted, as primitives: the arena operations (`view`,
 `instantiate`, `mk_*`), the environment and the local context, unfolding a
-definition, the field of a constructor application. Trusted, as single
-rules for now: recursor and quotient reduction (`RRec`), type inference
-where definitional equality uses it (η, structure η, proof irrelevance,
-unit-like types), and garbage collection keeping the terms in use (`RCopy`).
+definition, the field of a constructor application, applying the rule of a
+recursor to a constructor application. Trusted, as single rules for now:
+type inference where the rules use it (η, structure η, proof irrelevance,
+unit-like types, K-like reduction), and garbage collection keeping the terms
+in use (`RCopy`).
 
 The proofs are erased when compiling, so they cost nothing at run time
 (building the certified results costs some allocations). They rely on the
@@ -158,16 +162,16 @@ not finish within 60 s.
 
 | Category | Passed | Total | Time (s) |
 | --- | --- | --- | --- |
-| `bad/bugs` | 26 | 26 | 8.8 |
-| `bad/other` | 5 | 5 | 1.5 |
-| `bad/perf` | 2 | 2 | 1.2 |
-| `bad/tutorial` | 47 | 47 | 13.7 |
-| `good/corner-cases` | 1 | 1 | 0.3 |
-| `good/init-prelude.ndjson` | 1 | 1 | 1.5 |
-| `good/other` | 5 | 5 | 1.5 |
-| `good/perf` | 22 | 26 | 320.6 |
-| `good/tutorial` | 94 | 94 | 27.5 |
-| **Total** | **203** | **207** | 376.6 |
+| `bad/bugs` | 26 | 26 | 8.5 |
+| `bad/other` | 5 | 5 | 1.2 |
+| `bad/perf` | 2 | 2 | 1.1 |
+| `bad/tutorial` | 47 | 47 | 13.5 |
+| `good/corner-cases` | 1 | 1 | 0.2 |
+| `good/init-prelude.ndjson` | 1 | 1 | 1.7 |
+| `good/other` | 5 | 5 | 1.3 |
+| `good/perf` | 22 | 26 | 323.9 |
+| `good/tutorial` | 94 | 94 | 19.8 |
+| **Total** | **203** | **207** | 371.2 |
 
 Failures (all timeouts at 60 s):
 
@@ -178,9 +182,9 @@ Failures (all timeouts at 60 s):
 | `good/perf/magma-list-deep-n36` | not tried beyond 60 s |
 | `good/perf/magma-list-pair-n21` | not finished within 400 s |
 
-The slowest tests that pass: `magma-list-pair-n7` 42.5 s, `beta-ladder`
-12.9 s, `grind-ring-5` 11.2 s, `let-ladder` 5.6 s; every other test takes
-under 2 s (`init-prelude`: 1.5 s).
+The slowest tests that pass: `magma-list-pair-n7` 31.5 s, `grind-ring-5`
+18.5 s, `beta-ladder` 14.1 s, `let-ladder` 8.1 s; every other test takes
+under 2 s (`init-prelude`: 1.7 s).
 
 The `magma-list` tests check a `decide` proof that enumerates a magma
 equation in 5 variables over `Fin n`; `app-lam` has not been profiled yet.
