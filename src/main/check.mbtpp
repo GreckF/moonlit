@@ -6,6 +6,10 @@ fn check_type(k : K, e : Expr) -> Expr raise KernelError {
   check_c(k, e).ty()
 }
 
+fn infer_type(k : K, e : Expr) -> Expr raise KernelError {
+  infer_c(k, e).ty()
+}
+
 fn ensure_sort_c(k : K, t : Expr, s : Expr) -> SortOf(k, t) raise KernelError {
   match inspect(view(k, t)) {
     MkSing(VSort(u), ev) => MkSortOf(t, u, RRefl, ev)
@@ -21,6 +25,11 @@ fn ensure_sort_c(k : K, t : Expr, s : Expr) -> SortOf(k, t) raise KernelError {
 }
 
 fn ensure_pi_c(k : K, t : Expr, s : Expr) -> PiOf(k, t) raise KernelError {
+  pi_of_c(k, t, s, "function expected: ")
+}
+
+// `t` reduces to a pi; otherwise the error `what` about `s`
+fn pi_of_c(k : K, t : Expr, s : Expr, what : String) -> PiOf(k, t) raise KernelError {
   match inspect(view(k, t)) {
     MkSing(VPi(n, d, b, bi), ev) => MkPiOf(t, n, d, b, bi, RRefl, ev)
     MkSing(_, _) =>
@@ -28,7 +37,7 @@ fn ensure_pi_c(k : K, t : Expr, s : Expr) -> PiOf(k, t) raise KernelError {
         MkRedTo(t2, p) =>
           match inspect(view(k, t2)) {
             MkSing(VPi(n, d, b, bi), ev) => MkPiOf(t2, n, d, b, bi, p, ev)
-            MkSing(_, _) => kfail("function expected: " + show_expr(k, s))
+            MkSing(_, _) => kfail(what + show_expr(k, s))
           }
       }
   }
@@ -63,9 +72,8 @@ fn check_c(k : K, e : Expr) -> TypeOf(k, e) raise KernelError {
     MkSing(VProj(n, idx, x), ev) =>
       match check_c(k, x) {
         MkTypeOf(st, px) =>
-          match inspect(proj_type(k, e, n, idx, x, st)) {
-            MkSing(Ok(t), et) => MkTypeOf(t, TProj(ev, px, et))
-            MkSing(Err(err), _) => raise err
+          match proj_type_c(k, e, n, idx, x, st) {
+            MkProjTypeOf(t, et) => MkTypeOf(t, TProj(ev, px, et))
           }
       }
     MkSing(VFVar(id), ev) => MkTypeOf(local_type(k, id), TFVar(ev))
@@ -238,6 +246,243 @@ fn check_let_c(k : K, e : Expr, n : Name, t : Expr, v : Expr, b : Expr, ev : vie
               }
           }
       }
+  }
+}
+
+// ---- inference mode -------------------------------------------------------------------
+
+// Type inference without the checks (lean4lean's `inferType` with
+// `inferOnly := true`), certified with an `InfType` derivation.
+fn infer_c(k : K, e : Expr) -> InfOf(k, e) raise KernelError {
+  if has_loose_bvars(k, e) {
+    kfail("type checker does not support loose bound variables")
+  }
+  bump(k, ST_INFER)
+  match k.tc.infer_i.get(e) {
+    Some(a) =>
+      match any_inf_get(k, e, a) {
+        Some(r) => {
+          bump(k, ST_INFER_HIT)
+          return r
+        }
+        None => ()
+      }
+    None => ()
+  }
+  let r : InfOf(k, e) = match inspect(view(k, e)) {
+    MkSing(VNatLit(_), ev) => MkInfOf(mk_const(k, k.names.nat, Nil), INat(ev))
+    MkSing(VStrLit(_), ev) => MkInfOf(mk_const(k, k.names.string, Nil), IStr(ev))
+    MkSing(VProj(n, idx, x), ev) =>
+      match infer_c(k, x) {
+        MkInfOf(st, px) =>
+          match proj_type_c(k, e, n, idx, x, st) {
+            MkProjTypeOf(t, et) => MkInfOf(t, IProj(ev, px, et))
+          }
+      }
+    MkSing(VFVar(id), ev) => MkInfOf(local_type(k, id), IFVar(ev))
+    MkSing(VBVar(_), _) => kfail("unexpected bound variable")
+    MkSing(VSort(l), ev) => MkInfOf(mk_sort(k, Succ(l)), ISort(ev))
+    MkSing(VConst(n, ls), ev) =>
+      match inspect(env_find(k, n)) {
+        MkSing(Some(info), eci) =>
+          match Int::deq(info.num_lparams(k), list_length(ls)) {
+            Yes(en) => MkInfOf(instantiate_lparams(k, info.type, info.lparams, ls), IConst(ev, eci, en))
+            No(_) => kfail("incorrect number of universe levels for '\{n}'")
+          }
+        MkSing(None, _) => kfail("unknown constant '\{n}'")
+      }
+    MkSing(VLam(n, d, b, _), ev) =>
+      match fresh_local(k, n, d) {
+        MkFresh(x, _, ex, et, elv) =>
+          match infer_c(k, instantiate1(k, b, x)) {
+            MkInfOf(bt, pb) => MkInfOf(mk_pi_fvars(k, [x], cheap_beta_reduce(k, bt)), ILam(ev, ex, et, elv, pb))
+          }
+      }
+    MkSing(VPi(n, d, b, _), ev) =>
+      match infer_c(k, d) {
+        MkInfOf(sd, pd) =>
+          match ensure_sort_c(k, sd, d) {
+            MkSortOf(_, u, rs, es) =>
+              match fresh_local(k, n, d) {
+                MkFresh(x, _, ex, et, elv) => {
+                  let body = instantiate1(k, b, x)
+                  match infer_c(k, body) {
+                    MkInfOf(sb, pb) =>
+                      match ensure_sort_c(k, sb, body) {
+                        MkSortOf(_, v, rb, eb) => MkInfOf(mk_sort(k, mk_imax(u, v)), IPi(ev, pd, rs, es, ex, et, elv, pb, rb, eb))
+                      }
+                  }
+                }
+              }
+          }
+      }
+    MkSing(VApp(f, a), ev) =>
+      match infer_c(k, f) {
+        MkInfOf(ft, pf) =>
+          match ensure_pi_c(k, ft, e) {
+            MkPiOf(_, _, _, body, _, rp, ep) => MkInfOf(instantiate1(k, body, a), IApp(ev, pf, rp, ep))
+          }
+      }
+    MkSing(VLet(n, t, v, b), ev) =>
+      match fresh_let(k, n, t, v) {
+        MkFresh(x, _, ex, et, elv) =>
+          match infer_c(k, instantiate1(k, b, x)) {
+            MkInfOf(bt, pb) => MkInfOf(mk_pi_fvars(k, [x], cheap_beta_reduce(k, bt)), ILet(ev, ex, et, elv, pb))
+          }
+      }
+  }
+  match r {
+    MkInfOf(t, p) => {
+      k.tc.infer_i.set(e, MkAnyInf(k, e, t, p))
+      tc_log(k, C_INFER_I, e, 0)
+    }
+  }
+  r
+}
+
+// ---- projections ----------------------------------------------------------------------
+
+enum ProjTypeOf : (K, Name, Int, Expr, Expr) -> Type {
+  MkProjTypeOf[k : K, n : Name, i : Int, x : Expr, st : Expr](t : Expr, p : ProjType(k, n, i, x, st, t)) : ProjTypeOf(k, n, i, x, st)
+}
+
+enum ParamsOf : (K, Expr, Expr, Int, Int) -> Type {
+  MkParamsOf[k : K, r : Expr, t : Expr, i : Int, np : Int](r2 : Expr, p : ProjParams(k, r, t, i, np, r2)) : ParamsOf(k, r, t, i, np)
+}
+
+enum FieldsOf : (K, Expr, Name, Expr, Int, Int, Bool) -> Type {
+  MkFieldsOf[k : K, r : Expr, ind : Name, x : Expr, i : Int, idx : Int, mp : Bool](r2 : Expr, p : ProjFields(k, r, ind, x, i, idx, mp, r2)) : FieldsOf(k, r, ind, x, i, idx, mp)
+}
+
+fn[T] bad_proj(k : K, e : Expr) -> T raise KernelError {
+  kfail("invalid projection: " + show_expr(k, e))
+}
+
+// the type of the projection `e` (field `i` of `x`, whose type is `st`)
+fn proj_type_c(k : K, e : Expr, n : Name, i : Int, x : Expr, st : Expr) -> ProjTypeOf(k, n, i, x, st) raise KernelError {
+  match whnf_c(k, st) {
+    MkRedTo(s, rs) =>
+      match inspect(view(k, get_app_fn(k, s))) {
+        MkSing(VConst(n2, ls), eh) =>
+          match Name::deq(n2, n) {
+            Yes(Refl) =>
+              match inspect(env_find_induct(k, n)) {
+                MkSing(Some(iv), ei) =>
+                  match inspect(iv.ctors) {
+                    MkSing(Cons(c, Nil), ec) =>
+                      match Int::deq(get_app_num_args(k, s), iv.nparams + iv.nindices) {
+                        Yes(ea) =>
+                          match inspect(env_find(k, c)) {
+                            MkSing(Some(ci), eci) =>
+                              match proj_params_c(k, e, instantiate_lparams(k, ci.type, ci.lparams, ls), s, 0, iv.nparams) {
+                                MkParamsOf(r1, pp) =>
+                                  match infer_c(k, s) {
+                                    MkInfOf(ts, pts) =>
+                                      match ensure_sort_c(k, ts, s) {
+                                        MkSortOf(_, u, rts, ets) =>
+                                          match inspect(not(u.is_never_zero())) {
+                                            MkSing(mp, emp) =>
+                                              match proj_fields_c(k, e, n, x, r1, 0, i, mp) {
+                                                MkFieldsOf(r2, pf) =>
+                                                  match pi_of_c(k, r2, e, "invalid projection: ") {
+                                                    MkPiOf(_, _, dom, _, _, rw, ew) =>
+                                                      match prop_ok_c(k, e, mp, dom) {
+                                                        Holds(po) => MkProjTypeOf(dom, MkProjType(rs, eh, ei, ec, ea, eci, pp, pts, rts, ets, emp, pf, rw, ew, po))
+                                                        Fail => bad_proj(k, e)
+                                                      }
+                                                  }
+                                              }
+                                          }
+                                      }
+                                  }
+                              }
+                            MkSing(None, _) => kfail("unknown constant '\{c}'")
+                          }
+                        No(_) => bad_proj(k, e)
+                      }
+                    MkSing(_, _) => bad_proj(k, e)
+                  }
+                MkSing(None, _) => bad_proj(k, e)
+              }
+            No(_) => bad_proj(k, e)
+          }
+        MkSing(_, _) => bad_proj(k, e)
+      }
+  }
+}
+
+fn proj_params_c(k : K, e : Expr, r : Expr, t : Expr, i : Int, np : Int) -> ParamsOf(k, r, t, i, np) raise KernelError {
+  match Int::deq(i, np) {
+    Yes(Refl) => MkParamsOf(r, PPDone)
+    No(_) =>
+      match pi_of_c(k, r, e, "invalid projection: ") {
+        MkPiOf(_, _, _, b, _, rp, ep) =>
+          match inspect(app_arg_n(k, t, i)) {
+            MkSing(Some(a), ea) =>
+              match proj_params_c(k, e, instantiate1(k, b, a), t, i + 1, np) {
+                MkParamsOf(r2, p) => MkParamsOf(r2, PPStep(rp, ep, ea, p))
+              }
+            MkSing(None, _) => bad_proj(k, e)
+          }
+      }
+  }
+}
+
+fn proj_fields_c(k : K, e : Expr, ind : Name, x : Expr, r : Expr, i : Int, idx : Int, mp : Bool) -> FieldsOf(k, r, ind, x, i, idx, mp) raise KernelError {
+  match Int::deq(i, idx) {
+    Yes(Refl) => MkFieldsOf(r, PFDone)
+    No(_) =>
+      match pi_of_c(k, r, e, "invalid projection: ") {
+        MkPiOf(_, _, d, b, _, rp, ep) =>
+          match reflect(has_loose_bvars(k, b)) {
+            IsTrue(h) => {
+              // prop structures cannot have non-prop dependent fields
+              match prop_ok_c(k, e, mp, d) {
+                Holds(po) =>
+                  match proj_fields_c(k, e, ind, x, instantiate1(k, b, mk_proj(k, ind, i, x)), i + 1, idx, mp) {
+                    MkFieldsOf(r2, p) => MkFieldsOf(r2, PFDep(rp, ep, h, po, p))
+                  }
+                Fail => bad_proj(k, e)
+              }
+            }
+            IsFalse(h) =>
+              match proj_fields_c(k, e, ind, x, b, i + 1, idx, mp) {
+                MkFieldsOf(r2, p) => MkFieldsOf(r2, PFNonDep(rp, ep, h, p))
+              }
+          }
+      }
+  }
+}
+
+fn prop_ok_c(k : K, e : Expr, mp : Bool, d : Expr) -> Check[PropOk(k, mp, d)] raise KernelError {
+  match mp {
+    false => Holds(PONo)
+    true =>
+      match is_prop_c(k, d) {
+        Holds(p) => Holds(POYes(p))
+        Fail => bad_proj(k, e)
+      }
+  }
+}
+
+// whether `p` is a proposition, with the derivation when it is
+fn is_prop_c(k : K, p : Expr) -> Check[IsProp(k, p)] raise KernelError {
+  match infer_c(k, p) {
+    MkInfOf(s, ps) =>
+      match ensure_sort_c(k, s, p) {
+        MkSortOf(_, u, r, e) =>
+          match always_zero(u) {
+            Holds(z) => Holds(MkIsProp(ps, r, e, z))
+            Fail => Fail
+          }
+      }
+  }
+}
+
+fn is_prop(k : K, e : Expr) -> Bool raise KernelError {
+  match is_prop_c(k, e) {
+    Holds(_) => true
+    Fail => false
   }
 }
 

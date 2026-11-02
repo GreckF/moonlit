@@ -82,7 +82,16 @@ rules) and [`src/main/defeq.mbtpp`](src/main/defeq.mbtpp):
   derivation of `HasType(k, e, t)` (in [`src/main/check.mbtpp`](src/main/check.mbtpp));
   so the value of every definition, theorem and opaque constant that is
   accepted has a derivation that it has the declared type, and the declared
-  type a derivation that it is a type.
+  type a derivation that it is a type;
+- type inference in its fast mode (without the checks, used by η, structure
+  η, proof irrelevance, unit-like types and K-like reduction) returns the type
+  with a derivation of `InfType(k, e, t)`, whose rules are those of `HasType`
+  without the checks; whether a type is a proposition comes with a derivation
+  that its sort is `Prop` under every assignment of the level parameters;
+- the type of a projection comes with a derivation of `ProjType`: the type of
+  the constructor instantiated with the parameters and the earlier
+  projections, with the proofs that the dependent fields of a structure that
+  may be a proposition are proofs.
 
 A certificate shows that the answer follows from the rules; it does not show
 that the rules are those of Lean's type theory, nor that the primitives used
@@ -90,11 +99,8 @@ in them are correct. Trusted, as primitives: the arena operations (`view`,
 `instantiate`, `mk_*`), the environment and the local context, unfolding a
 definition, the field of a constructor application, applying the rule of a
 recursor to a constructor application, building the type of a binder from
-the type of its body (`mk_pi_fvars`, `cheap_beta_reduce`). Trusted, as single
-rules for now: the type of a projection, type inference in its fast mode
-(without checks) where the rules use it (η, structure η, proof irrelevance,
-unit-like types, K-like reduction), and garbage collection keeping the terms
-in use (`RCopy`).
+the type of its body (`mk_pi_fvars`, `cheap_beta_reduce`). Trusted, as a single
+rule: garbage collection keeping the terms in use (`RCopy`).
 
 The proofs are erased when compiling, so they cost nothing at run time
 (building the certified results costs some allocations). They rely on the
@@ -147,12 +153,12 @@ rejected.
 | `src/main/name.mbtpp`, `level.mbtpp` | names; universe levels |
 | `src/main/level_proof.mbtpp` | the semantics of levels; the decision procedure for `≤` and the other level operations, with proofs |
 | `src/main/nat_proof.mbtpp` | Lean's definitions of the accelerated Nat operations, proved equal to the ones the kernel uses |
-| `src/main/judgment.mbtpp` | the judgments `Red`, `DefEq` and `HasType` the kernel's answers are certified with |
+| `src/main/judgment.mbtpp` | the judgments `Red`, `DefEq`, `InfType` and `HasType` the kernel's answers are certified with |
 | `src/main/defeq.mbtpp` | definitional equality, certified |
-| `src/main/check.mbtpp` | type inference in checking mode, certified; the typing certificates of declarations |
+| `src/main/check.mbtpp` | type inference in both modes, certified; the typing certificates of declarations |
 | `src/main/expr.mbtpp` | expressions, hash-consed in an arena (equality and caches are O(1)); substitution; region-based collection |
 | `src/main/env.mbtpp` | declarations, environment, local context |
-| `src/main/tc.mbtpp` | type inference, whnf (certified), literals, quotient and recursor reduction |
+| `src/main/tc.mbtpp` | whnf (certified), literals, quotient and recursor reduction |
 | `src/main/inductive.mbtpp` | inductive types: checks, recursor generation, nested inductives |
 | `src/main/decl.mbtpp` | checking declarations; quotients |
 | `src/main/loader.mbtpp` | replaying an export file |
@@ -172,16 +178,16 @@ not finish within 60 s.
 
 | Category | Passed | Total | Time (s) |
 | --- | --- | --- | --- |
-| `bad/bugs` | 26 | 26 | 7.5 |
-| `bad/other` | 5 | 5 | 1.2 |
+| `bad/bugs` | 26 | 26 | 8.2 |
+| `bad/other` | 5 | 5 | 1.3 |
 | `bad/perf` | 2 | 2 | 1.0 |
-| `bad/tutorial` | 47 | 47 | 10.8 |
+| `bad/tutorial` | 47 | 47 | 14.0 |
 | `good/corner-cases` | 1 | 1 | 0.3 |
-| `good/init-prelude.ndjson` | 1 | 1 | 1.9 |
+| `good/init-prelude.ndjson` | 1 | 1 | 2.0 |
 | `good/other` | 5 | 5 | 1.8 |
-| `good/perf` | 23 | 26 | 302.2 |
-| `good/tutorial` | 94 | 94 | 19.5 |
-| **Total** | **204** | **207** | 346.2 |
+| `good/perf` | 23 | 26 | 296.4 |
+| `good/tutorial` | 94 | 94 | 20.5 |
+| **Total** | **204** | **207** | 345.5 |
 
 Failures (all timeouts at 60 s):
 
@@ -191,9 +197,9 @@ Failures (all timeouts at 60 s):
 | `good/perf/magma-list-deep-n36` | not tried beyond 60 s |
 | `good/perf/magma-list-pair-n21` | not finished within 400 s |
 
-The slowest tests that pass: `magma-list-deep-n21` 43.8 s,
-`magma-list-pair-n7` 33.2 s, `beta-ladder` 16.1 s, `grind-ring-5` 14.7 s,
-`let-ladder` 5.3 s; every other test takes under 2 s (`init-prelude`: 1.9 s).
+The slowest tests that pass: `magma-list-deep-n21` 41.8 s,
+`magma-list-pair-n7` 38.1 s, `beta-ladder` 11.7 s, `grind-ring-5` 11.5 s,
+`let-ladder` 5.0 s; every other test takes under 2 s (`init-prelude`: 2.0 s).
 
 The `magma-list` tests check a `decide` proof that enumerates a magma
 equation in 5 variables over `Fin n`; `app-lam` has not been profiled yet.

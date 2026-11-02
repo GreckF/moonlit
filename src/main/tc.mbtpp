@@ -2,7 +2,7 @@
 // equality, following lean4lean's `TypeChecker.lean`.
 
 struct Tc {
-  mut infer_i : HashMap[Int, Expr]
+  mut infer_i : HashMap[Int, AnyInf]
   mut infer_c : HashMap[Int, AnyHas]
   mut whnf_core_c : HashMap[Int, AnyRed]
   mut whnf_c : HashMap[Int, AnyRed]
@@ -47,14 +47,6 @@ fn tc_log(k : K, c : Int, x : Int, y : Int) -> Unit {
   t.log_len = t.log_len + 1
 }
 
-fn cache_of(k : K, c : Int) -> HashMap[Int, Expr] {
-  if c == C_INFER_I {
-    k.tc.infer_i
-  } else {
-    k.tc.unfold_c
-  }
-}
-
 // Remove the cache entries written since `lmark` that mention nodes `>= mark`.
 fn tc_purge(k : K, mark : Int, lmark : Int) -> Unit {
   let t = k.tc
@@ -69,6 +61,17 @@ fn tc_purge(k : K, mark : Int, lmark : Int) -> Unit {
         false
       } else {
         true
+      }
+    } else if c == C_INFER_I {
+      match t.infer_i.get(x) {
+        Some(a) =>
+          if x >= mark || a.ty() >= mark {
+            t.infer_i.remove(x)
+            false
+          } else {
+            true
+          }
+        None => false
       }
     } else if c == C_INFER_C {
       match t.infer_c.get(x) {
@@ -116,7 +119,7 @@ fn tc_purge(k : K, mark : Int, lmark : Int) -> Unit {
         None => false
       }
     } else {
-      let m = cache_of(k, c)
+      let m = k.tc.unfold_c
       match m.get(x) {
         Some(v) =>
           if x >= mark || v >= mark {
@@ -227,41 +230,6 @@ fn ensure_pi_core(k : K, e : Expr, s : Expr) -> Expr raise KernelError {
   }
 }
 
-fn check_level(k : K, l : Level) -> Unit raise KernelError {
-  match l.undef_param(k.tc.lparams) {
-    Some(n) => kfail("undefined universe level parameter '\{n}'")
-    None => ()
-  }
-}
-
-fn infer_constant(k : K, e : Expr, n : Name, ls : List[Level], infer_only : Bool) -> Expr raise KernelError {
-  let info = env_get(k, n)
-  if info.num_lparams(k) != list_length(ls) {
-    kfail("incorrect number of universe levels for '\{n}'")
-  }
-  if not(infer_only) {
-    if info.is_unsafe(k) {
-      match k.tc.safety {
-        UnsafeDecl => ()
-        _ => kfail("invalid declaration, it uses unsafe declaration '\{n}'")
-      }
-    }
-    if info.is_partial(k) {
-      match k.tc.safety {
-        SafeDecl => kfail("invalid declaration, safe declaration must not contain partial declaration '\{n}'")
-        _ => ()
-      }
-    }
-    let mut cur = ls
-    while cur is Cons(l, rest) {
-      check_level(k, l)
-      cur = rest
-    }
-  }
-  ignore(e)
-  instantiate_lparams(k, info.type, info.lparams, ls)
-}
-
 // `(fun x1 .. xn => b) a1 .. am` without substitution, when cheap.
 fn cheap_beta_reduce(k : K, e : Expr) -> Expr {
   if not(is_app(k, e)) {
@@ -288,225 +256,7 @@ fn cheap_beta_reduce(k : K, e : Expr) -> Expr {
   }
 }
 
-// ---- type inference ----------------------------------------------------------------------
-
-fn infer_type(k : K, e : Expr) -> Expr raise KernelError {
-  infer_type_core(k, e, true)
-}
-
-fn infer_type_core(k : K, e : Expr, infer_only : Bool) -> Expr raise KernelError {
-  if not(infer_only) {
-    return check_type(k, e)
-  }
-  if has_loose_bvars(k, e) {
-    kfail("type checker does not support loose bound variables")
-  }
-  let cache = k.tc.infer_i
-  bump(k, ST_INFER)
-  match cache.get(e) {
-    Some(r) => {
-      bump(k, ST_INFER_HIT)
-      return r
-    }
-    None => ()
-  }
-  let r = match view(k, e) {
-    VNatLit(_) => {
-      if not(infer_only) {
-        ignore(env_get(k, k.names.nat))
-      }
-      mk_const(k, k.names.nat, Nil)
-    }
-    VStrLit(_) => {
-      if not(infer_only) {
-        ignore(env_get(k, k.names.char_of_nat))
-        ignore(env_get(k, k.names.string_of_list))
-      }
-      mk_const(k, k.names.string, Nil)
-    }
-    VProj(s, idx, x) => infer_proj(k, e, s, idx, x, infer_type_core(k, x, infer_only))
-    VFVar(id) => local_type(k, id)
-    VBVar(_) => kfail("unexpected bound variable")
-    VSort(l) => {
-      if not(infer_only) {
-        check_level(k, l)
-      }
-      mk_sort(k, Succ(l))
-    }
-    VConst(n, ls) => infer_constant(k, e, n, ls, infer_only)
-    VLam(_, _, _, _) => infer_lambda(k, e, infer_only)
-    VPi(_, _, _, _) => infer_pi(k, e, infer_only)
-    VApp(f, a) =>
-      if infer_only {
-        infer_app(k, e)
-      } else {
-        let ftype = ensure_pi_core(k, infer_type_core(k, f, infer_only), e)
-        let atype = infer_type_core(k, a, infer_only)
-        let dtype = binding_domain(k, ftype)
-        let ok = if get_app_num_args(k, a) == 2 && is_const_of(k, get_app_fn(k, a), k.names.eager_reduce) {
-          let saved = k.tc.eager
-          k.tc.eager = true
-          let r = is_def_eq(k, dtype, atype)
-          k.tc.eager = saved
-          r
-        } else {
-          is_def_eq(k, dtype, atype)
-        }
-        if not(ok) {
-          kfail("application type mismatch: " + show_expr(k, e))
-        }
-        instantiate1(k, binding_body(k, ftype), a)
-      }
-    VLet(_, _, _, _) => infer_let(k, e, infer_only)
-  }
-  cache.set(e, r)
-  tc_log(k, C_INFER_I, e, 0)
-  r
-}
-
-fn infer_lambda(k : K, e0 : Expr, infer_only : Bool) -> Expr raise KernelError {
-  let fvars : Array[Expr] = Array::new()
-  let mut e = e0
-  while is_lam(k, e) {
-    let d = instantiate_rev(k, binding_domain(k, e), fvars)
-    if not(infer_only) {
-      ignore(ensure_sort_core(k, infer_type_core(k, d, infer_only), d))
-    }
-    fvars.push(mk_local_decl(k, binding_name(k, e), d))
-    e = binding_body(k, e)
-  }
-  let r = infer_type_core(k, instantiate_rev(k, e, fvars), infer_only)
-  mk_pi_fvars(k, fvars, cheap_beta_reduce(k, r))
-}
-
-fn infer_pi(k : K, e0 : Expr, infer_only : Bool) -> Expr raise KernelError {
-  let fvars : Array[Expr] = Array::new()
-  let us : Array[Level] = Array::new()
-  let mut e = e0
-  while is_pi(k, e) {
-    let d = instantiate_rev(k, binding_domain(k, e), fvars)
-    let t1 = ensure_sort_core(k, infer_type_core(k, d, infer_only), d)
-    us.push(sort_level(k, t1))
-    fvars.push(mk_local_decl(k, binding_name(k, e), d))
-    e = binding_body(k, e)
-  }
-  let body = instantiate_rev(k, e, fvars)
-  let s = ensure_sort_core(k, infer_type_core(k, body, infer_only), body)
-  let mut l = sort_level(k, s)
-  for i = us.length() - 1; i >= 0; i = i - 1 {
-    l = mk_imax(us[i], l)
-  }
-  mk_sort(k, l)
-}
-
-fn infer_app(k : K, e : Expr) -> Expr raise KernelError {
-  let f = get_app_fn(k, e)
-  let args = get_app_args(k, e)
-  let mut ftype = infer_type_core(k, f, true)
-  let mut j = 0
-  for i = 0; i < args.length(); i = i + 1 {
-    if is_pi(k, ftype) {
-      ftype = binding_body(k, ftype)
-    } else {
-      ftype = instantiate_rev(k, ftype, args.slice(j, i))
-      ftype = binding_body(k, ensure_pi_core(k, ftype, e))
-      j = i
-    }
-  }
-  instantiate_rev(k, ftype, args.slice(j, args.length()))
-}
-
-fn infer_let(k : K, e0 : Expr, infer_only : Bool) -> Expr raise KernelError {
-  let fvars : Array[Expr] = Array::new()
-  let mut e = e0
-  while kind_of(k, e) == K_LET {
-    match view(k, e) {
-      VLet(n, t0, v0, b) => {
-        let t = instantiate_rev(k, t0, fvars)
-        let v = instantiate_rev(k, v0, fvars)
-        if not(infer_only) {
-          ignore(ensure_sort_core(k, infer_type_core(k, t, infer_only), t))
-          let vt = infer_type_core(k, v, infer_only)
-          if not(is_def_eq(k, vt, t)) {
-            kfail("let type mismatch: " + n.to_string())
-          }
-        }
-        fvars.push(mk_let_decl(k, n, t, v))
-        e = b
-      }
-      _ => break
-    }
-  }
-  let r = infer_type_core(k, instantiate_rev(k, e, fvars), infer_only)
-  mk_pi_fvars(k, fvars, cheap_beta_reduce(k, r))
-}
-
-fn get_sort_level(k : K, e : Expr) -> Level raise KernelError {
-  sort_level(k, ensure_sort_core(k, infer_type(k, e), e))
-}
-
-fn is_prop(k : K, e : Expr) -> Bool raise KernelError {
-  get_sort_level(k, e).is_always_zero()
-}
-
-fn infer_proj(k : K, e : Expr, tname : Name, idx : Int, s : Expr, stype : Expr) -> Expr raise KernelError {
-  let t = whnf(k, stype)
-  let i_fn = get_app_fn(k, t)
-  let args = get_app_args(k, t)
-  let i_name = match const_name(k, i_fn) {
-    Some(n) => n
-    None => kfail("invalid projection: " + show_expr(k, e))
-  }
-  if i_name != tname {
-    kfail("invalid projection: " + show_expr(k, e))
-  }
-  let ival = match env_find_induct(k, i_name) {
-    Some(v) => v
-    None => kfail("invalid projection: " + show_expr(k, e))
-  }
-  let c = match ival.ctors {
-    Cons(c, Nil) => c
-    _ => kfail("invalid projection: " + show_expr(k, e))
-  }
-  if args.length() != ival.nparams + ival.nindices {
-    kfail("invalid projection: " + show_expr(k, e))
-  }
-  let cinfo = env_get(k, c)
-  let mut r = instantiate_lparams(k, cinfo.type, cinfo.lparams, const_levels(k, i_fn))
-  for i = 0; i < ival.nparams; i = i + 1 {
-    let rw = whnf(k, r)
-    if not(is_pi(k, rw)) {
-      kfail("invalid projection: " + show_expr(k, e))
-    }
-    r = instantiate1(k, binding_body(k, rw), args[i])
-  }
-  let maybe_prop = not(get_sort_level(k, t).is_never_zero())
-  for i = 0; i < idx; i = i + 1 {
-    let rw = whnf(k, r)
-    if not(is_pi(k, rw)) {
-      kfail("invalid projection: " + show_expr(k, e))
-    }
-    let b = binding_body(k, rw)
-    if has_loose_bvars(k, b) {
-      // prop structures cannot have non-prop dependent fields
-      if maybe_prop && not(is_prop(k, binding_domain(k, rw))) {
-        kfail("invalid projection: " + show_expr(k, e))
-      }
-      r = instantiate1(k, b, mk_proj(k, i_name, i, s))
-    } else {
-      r = b
-    }
-  }
-  let rw = whnf(k, r)
-  if not(is_pi(k, rw)) {
-    kfail("invalid projection: " + show_expr(k, e))
-  }
-  let dom = binding_domain(k, rw)
-  if maybe_prop && not(is_prop(k, dom)) {
-    kfail("invalid projection: " + show_expr(k, e))
-  }
-  dom
-}
+// Type inference (both modes, certified) is in `check.mbtpp`.
 
 // ---- weak head normalization ---------------------------------------------------------------
 
@@ -1122,8 +872,8 @@ fn sort_never_zero(k : K, s : Expr) -> Bool {
 
 // K-like reduction: the major premise as the nullary constructor
 fn to_ctor_when_k_c(k : K, major_induct : Name, np : Int, m : Expr) -> EqTo(k, m) raise KernelError {
-  match inspect(infer_oracle(k, m)) {
-    MkSing(Ok(ty), ei) =>
+  match infer_c(k, m) {
+    MkInfOf(ty, ei) =>
       match whnf_c(k, ty) {
         MkRedTo(tyn, pr) => {
           if not(is_const_of(k, get_app_fn(k, tyn), major_induct)) {
@@ -1133,13 +883,12 @@ fn to_ctor_when_k_c(k : K, major_induct : Name, np : Int, m : Expr) -> EqTo(k, m
             IsTrue(hk) =>
               match inspect(mk_nullary_ctor(k, tyn, np)) {
                 MkSing(Some(c), ec) =>
-                  match inspect(infer_oracle(k, c)) {
-                    MkSing(Ok(cty), eci) =>
+                  match infer_c(k, c) {
+                    MkInfOf(cty, eci) =>
                       match is_def_eq_c(k, tyn, cty) {
                         Holds(q) => MkEqTo(c, DKLike(ei, pr, hk, ec, eci, q))
                         Fail => MkEqTo(m, DRefl)
                       }
-                    MkSing(Err(err), _) => raise err
                   }
                 MkSing(None, _) => MkEqTo(m, DRefl)
               }
@@ -1147,7 +896,6 @@ fn to_ctor_when_k_c(k : K, major_induct : Name, np : Int, m : Expr) -> EqTo(k, m
           }
         }
       }
-    MkSing(Err(err), _) => raise err
   }
 }
 
@@ -1193,8 +941,8 @@ fn to_ctor_when_struct_c(k : K, induct : Name, e : Expr) -> EqTo(k, e) raise Ker
     Some(iv) => if iv.is_rec { return MkEqTo(e, DRefl) }
     None => return MkEqTo(e, DRefl)
   }
-  match inspect(infer_oracle(k, e)) {
-    MkSing(Ok(ty), e1) =>
+  match infer_c(k, e) {
+    MkInfOf(ty, e1) =>
       match whnf_c(k, ty) {
         MkRedTo(tyn, pr) => {
           if not(is_const_of(k, get_app_fn(k, tyn), induct)) {
@@ -1202,8 +950,8 @@ fn to_ctor_when_struct_c(k : K, induct : Name, e : Expr) -> EqTo(k, e) raise Ker
           }
           match reflect(struct_type(k, tyn)) {
             IsTrue(hs) =>
-              match inspect(infer_oracle(k, tyn)) {
-                MkSing(Ok(sty), e2) =>
+              match infer_c(k, tyn) {
+                MkInfOf(sty, e2) =>
                   match whnf_c(k, sty) {
                     MkRedTo(styn, ps) =>
                       match reflect(sort_never_zero(k, styn)) {
@@ -1211,13 +959,11 @@ fn to_ctor_when_struct_c(k : K, induct : Name, e : Expr) -> EqTo(k, e) raise Ker
                         IsFalse(_) => MkEqTo(e, DRefl)
                       }
                   }
-                MkSing(Err(err), _) => raise err
               }
             IsFalse(_) => MkEqTo(e, DRefl)
           }
         }
       }
-    MkSing(Err(err), _) => raise err
   }
 }
 

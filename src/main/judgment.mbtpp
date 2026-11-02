@@ -10,8 +10,7 @@
 // are only added to the arena, except by a collection, which keeps the nodes
 // still in use; a fact `view(k, e) === v` about a node in use stays true.
 //
-// Trusted rule: `RCopy` (a collection copies the term). Type inference is
-// trusted where the rules use it (`infer_oracle`, `prop_oracle`).
+// Trusted rule: `RCopy` (a collection copies the term).
 //
 // As everywhere in moonlit, the proofs are checked by MoonBit++, whose logic
 // is inconsistent: see the README.
@@ -168,22 +167,172 @@ enum LevelsEqv : (List[Level], List[Level]) -> Prop {
   LsCons[a : Level, b : Level, as_ : List[Level], bs : List[Level]](LevelEqv(a, b), LevelsEqv(as_, bs)) : LevelsEqv(Cons(a, as_), Cons(b, bs))
 }
 
-// trusted: type inference, with its errors as a value
-fn infer_oracle(k : K, e : Expr) -> Result[Expr, KernelError] {
-  try {
-    Ok(infer_type(k, e))
-  } catch {
-    KernelError(msg) => Err(KernelError(msg))
+// the argument `i` of an application
+fn app_arg_n(k : K, t : Expr, i : Int) -> Expr? {
+  let n = get_app_num_args(k, t)
+  if i < 0 || i >= n {
+    return None
+  }
+  let mut e = t
+  for j = n - 1; j > i; j = j - 1 {
+    e = app_fn(k, e)
+  }
+  Some(app_arg(k, e))
+}
+
+// `InfType(k, e, t)`: `t` is the type of `e` by the rules of the inference
+// mode of type inference (Lean's `inferOnly := true`): the rules of `HasType`
+// without the checks, so `e` has type `t` when `e` is well typed
+enum InfType : (K, Expr, Expr) -> Prop {
+  ISort[k : K, e : Expr, l : Level](view(k, e) === VSort(l)) : InfType(k, e, mk_sort(k, Succ(l)))
+  IConst[k : K, e : Expr, c : Name, ls : List[Level], ci : ConstInfo](
+    view(k, e) === VConst(c, ls),
+    env_find(k, c) === Some(ci),
+    ci.num_lparams(k) === list_length(ls),
+  ) : InfType(k, e, instantiate_lparams(k, ci.type, ci.lparams, ls))
+  IFVar[k : K, e : Expr, id : Int](view(k, e) === VFVar(id)) : InfType(k, e, local_type(k, id))
+  INat[k : K, e : Expr, n : Nat](view(k, e) === VNatLit(n)) : InfType(k, e, mk_const(k, k.names.nat, Nil))
+  IStr[k : K, e : Expr, s : String](view(k, e) === VStrLit(s)) : InfType(k, e, mk_const(k, k.names.string, Nil))
+  IApp[k : K, e : Expr, f : Expr, a : Expr, ft : Expr, p : Expr, n : Name, dom : Expr, body : Expr, bi : BinderInfo](
+    view(k, e) === VApp(f, a),
+    InfType(k, f, ft),
+    Red(k, ft, p),
+    view(k, p) === VPi(n, dom, body, bi),
+  ) : InfType(k, e, instantiate1(k, body, a))
+  ILam[k : K, e : Expr, n : Name, d : Expr, b : Expr, bi : BinderInfo, x : Expr, id : Int, bt : Expr](
+    view(k, e) === VLam(n, d, b, bi),
+    view(k, x) === VFVar(id),
+    local_type(k, id) === d,
+    local_value(k, id) === None,
+    InfType(k, instantiate1(k, b, x), bt),
+  ) : InfType(k, e, mk_pi_fvars(k, [x], cheap_beta_reduce(k, bt)))
+  IPi[k : K, e : Expr, n : Name, d : Expr, b : Expr, bi : BinderInfo, sd : Expr, sdn : Expr, u : Level, x : Expr, id : Int, sb : Expr, sbn : Expr, v : Level](
+    view(k, e) === VPi(n, d, b, bi),
+    InfType(k, d, sd),
+    Red(k, sd, sdn),
+    view(k, sdn) === VSort(u),
+    view(k, x) === VFVar(id),
+    local_type(k, id) === d,
+    local_value(k, id) === None,
+    InfType(k, instantiate1(k, b, x), sb),
+    Red(k, sb, sbn),
+    view(k, sbn) === VSort(v),
+  ) : InfType(k, e, mk_sort(k, mk_imax(u, v)))
+  ILet[k : K, e : Expr, n : Name, t : Expr, v : Expr, b : Expr, x : Expr, id : Int, bt : Expr](
+    view(k, e) === VLet(n, t, v, b),
+    view(k, x) === VFVar(id),
+    local_type(k, id) === t,
+    local_value(k, id) === Some(v),
+    InfType(k, instantiate1(k, b, x), bt),
+  ) : InfType(k, e, mk_pi_fvars(k, [x], cheap_beta_reduce(k, bt)))
+  IProj[k : K, e : Expr, n : Name, i : Int, x : Expr, st : Expr, t : Expr](
+    view(k, e) === VProj(n, i, x),
+    InfType(k, x, st),
+    ProjType(k, n, i, x, st, t),
+  ) : InfType(k, e, t)
+}
+
+// `ProjType(k, n, i, x, st, t)`: the field `i` of `x`, of the structure type
+// `st` named `n`, has type `t` (Lean's `inferProj`): the type of the
+// constructor, instantiated with the parameters of `st` and then with the
+// projections of `x` for the fields before `i`
+enum ProjType : (K, Name, Int, Expr, Expr, Expr) -> Prop {
+  MkProjType[k : K, n : Name, i : Int, x : Expr, st : Expr, s : Expr, ls : List[Level], iv : InductVal, c : Name, ci : ConstInfo, r1 : Expr, ts : Expr, tsn : Expr, u : Level, mp : Bool, r2 : Expr, p : Expr, fname : Name, dom : Expr, body : Expr, bi : BinderInfo](
+    Red(k, st, s),
+    view(k, get_app_fn(k, s)) === VConst(n, ls),
+    env_find_induct(k, n) === Some(iv),
+    iv.ctors === Cons(c, Nil),
+    get_app_num_args(k, s) === iv.nparams + iv.nindices,
+    env_find(k, c) === Some(ci),
+    ProjParams(k, instantiate_lparams(k, ci.type, ci.lparams, ls), s, 0, iv.nparams, r1),
+    // `mp`: the structure may be a proposition
+    InfType(k, s, ts),
+    Red(k, ts, tsn),
+    view(k, tsn) === VSort(u),
+    not(u.is_never_zero()) === mp,
+    ProjFields(k, r1, n, x, 0, i, mp, r2),
+    Red(k, r2, p),
+    view(k, p) === VPi(fname, dom, body, bi),
+    PropOk(k, mp, dom),
+  ) : ProjType(k, n, i, x, st, dom)
+}
+
+// `r` instantiated with the arguments `i`, ..., `np - 1` of `t` is `r2`
+enum ProjParams : (K, Expr, Expr, Int, Int, Expr) -> Prop {
+  PPDone[k : K, r : Expr, t : Expr, np : Int] : ProjParams(k, r, t, np, np, r)
+  PPStep[k : K, r : Expr, t : Expr, i : Int, np : Int, r2 : Expr, p : Expr, n : Name, d : Expr, b : Expr, bi : BinderInfo, a : Expr](
+    Red(k, r, p),
+    view(k, p) === VPi(n, d, b, bi),
+    app_arg_n(k, t, i) === Some(a),
+    ProjParams(k, instantiate1(k, b, a), t, i + 1, np, r2),
+  ) : ProjParams(k, r, t, i, np, r2)
+}
+
+// `r` instantiated with the projections `i`, ..., `idx - 1` of `x` is `r2`;
+// when the structure may be a proposition, the fields the later ones depend
+// on are proofs
+enum ProjFields : (K, Expr, Name, Expr, Int, Int, Bool, Expr) -> Prop {
+  PFDone[k : K, r : Expr, ind : Name, x : Expr, idx : Int, mp : Bool] : ProjFields(k, r, ind, x, idx, idx, mp, r)
+  PFDep[k : K, r : Expr, ind : Name, x : Expr, i : Int, idx : Int, mp : Bool, r2 : Expr, p : Expr, n : Name, d : Expr, b : Expr, bi : BinderInfo](
+    Red(k, r, p),
+    view(k, p) === VPi(n, d, b, bi),
+    has_loose_bvars(k, b) === true,
+    PropOk(k, mp, d),
+    ProjFields(k, instantiate1(k, b, mk_proj(k, ind, i, x)), ind, x, i + 1, idx, mp, r2),
+  ) : ProjFields(k, r, ind, x, i, idx, mp, r2)
+  PFNonDep[k : K, r : Expr, ind : Name, x : Expr, i : Int, idx : Int, mp : Bool, r2 : Expr, p : Expr, n : Name, d : Expr, b : Expr, bi : BinderInfo](
+    Red(k, r, p),
+    view(k, p) === VPi(n, d, b, bi),
+    has_loose_bvars(k, b) === false,
+    ProjFields(k, b, ind, x, i + 1, idx, mp, r2),
+  ) : ProjFields(k, r, ind, x, i, idx, mp, r2)
+}
+
+// when `mp`, `d` is a proposition
+enum PropOk : (K, Bool, Expr) -> Prop {
+  PONo[k : K, d : Expr] : PropOk(k, false, d)
+  POYes[k : K, d : Expr](IsProp(k, d)) : PropOk(k, true, d)
+}
+
+// the inferred type of `e` with the derivation
+enum InfOf : (K, Expr) -> Type {
+  MkInfOf[k : K, e : Expr](t : Expr, p : InfType(k, e, t)) : InfOf(k, e)
+}
+
+fn[k : K, e : Expr] InfOf::ty(self : InfOf(k, e)) -> Expr {
+  match self {
+    MkInfOf(t, _) => t
   }
 }
 
-// trusted: whether a type is a proposition
-fn prop_oracle(k : K, t : Expr) -> Result[Bool, KernelError] {
-  try {
-    Ok(is_prop(k, t))
-  } catch {
-    KernelError(msg) => Err(KernelError(msg))
+// a cache entry of the inference mode
+enum AnyInf {
+  MkAnyInf(k : K, e : Expr, t : Expr, p : InfType(k, e, t))
+}
+
+fn AnyInf::ty(self : AnyInf) -> Expr {
+  match self {
+    MkAnyInf(_, _, t, _) => t
   }
+}
+
+fn any_inf_get(k : K, e : Expr, a : AnyInf) -> InfOf(k, e)? {
+  match a {
+    MkAnyInf(k2, e2, t, p) =>
+      match ptr_deq(k2, k) {
+        Proved(Refl) =>
+          match Int::deq(e2, e) {
+            Yes(Refl) => Some(MkInfOf(t, p))
+            No(_) => None
+          }
+        Unknown => None
+      }
+  }
+}
+
+// `p` is a proposition: its inferred type reduces to a sort that is always `Prop`
+enum IsProp : (K, Expr) -> Prop {
+  MkIsProp[k : K, p : Expr, s : Expr, sn : Expr, u : Level](InfType(k, p, s), Red(k, s, sn), view(k, sn) === VSort(u), AlwaysZero(u)) : IsProp(k, p)
 }
 
 // `t` is an inductive type with one constructor without fields or indices
@@ -283,52 +432,52 @@ enum DefEq : (K, Expr, Expr) -> Prop {
   ) : DefEq(k, a, b)
   // η: a function is its η-expansion
   DEta[k : K, s : Expr, ty0 : Expr, p : Expr, n : Name, ty : Expr, b : Expr, bi : BinderInfo](
-    infer_oracle(k, s) === Ok(ty0),
+    InfType(k, s, ty0),
     Red(k, ty0, p),
     view(k, p) === VPi(n, ty, b, bi),
   ) : DefEq(k, mk_lam(k, n, ty, mk_app(k, lift_loose_bvars(k, s, 0, 1), mk_bvar(k, 0)), bi), s)
   // structure η: `s` is the constructor applied to the fields of `t`
   DEtaStruct[k : K, t : Expr, s : Expr, ind : Name, np : Int, tt : Expr, st : Expr](
     eta_struct_shape(k, s) === Some((ind, np)),
-    infer_oracle(k, t) === Ok(tt),
-    infer_oracle(k, s) === Ok(st),
+    InfType(k, t, tt),
+    InfType(k, s, st),
     DefEq(k, tt, st),
     StructArgs(k, ind, t, s, np),
   ) : DefEq(k, t, s)
   // proof irrelevance
   DProofIrrel[k : K, t : Expr, s : Expr, p : Expr, q : Expr](
-    infer_oracle(k, t) === Ok(p),
-    prop_oracle(k, p) === Ok(true),
-    infer_oracle(k, s) === Ok(q),
+    InfType(k, t, p),
+    IsProp(k, p),
+    InfType(k, s, q),
     DefEq(k, p, q),
   ) : DefEq(k, t, s)
   // K-like types: a proof of an inductive proposition with one constructor
   // without fields is that constructor (applied to the parameters), when
   // their types are equal
   DKLike[k : K, m : Expr, ty : Expr, tyn : Expr, np : Int, c : Expr, cty : Expr](
-    infer_oracle(k, m) === Ok(ty),
+    InfType(k, m, ty),
     Red(k, ty, tyn),
     k_target_type(k, tyn) === true,
     mk_nullary_ctor(k, tyn, np) === Some(c),
-    infer_oracle(k, c) === Ok(cty),
+    InfType(k, c, cty),
     DefEq(k, tyn, cty),
   ) : DefEq(k, m, c)
   // structure η: a term of a structure (not a proposition) is the
   // constructor applied to its projections
   DEtaExp[k : K, m : Expr, ty : Expr, tyn : Expr, sty : Expr, styn : Expr](
-    infer_oracle(k, m) === Ok(ty),
+    InfType(k, m, ty),
     Red(k, ty, tyn),
     struct_type(k, tyn) === true,
-    infer_oracle(k, tyn) === Ok(sty),
+    InfType(k, tyn, sty),
     Red(k, sty, styn),
     sort_never_zero(k, styn) === true,
   ) : DefEq(k, m, expand_eta_struct(k, tyn, m))
   // two terms of a unit-like type
   DUnit[k : K, t : Expr, s : Expr, ty : Expr, tyn : Expr, sy : Expr](
-    infer_oracle(k, t) === Ok(ty),
+    InfType(k, t, ty),
     Red(k, ty, tyn),
     unit_like(k, tyn) === true,
-    infer_oracle(k, s) === Ok(sy),
+    InfType(k, s, sy),
     DefEq(k, tyn, sy),
   ) : DefEq(k, t, s)
 }
@@ -374,17 +523,6 @@ fn any_eq_get(k : K, e : Expr, a : AnyEq) -> EqTo(k, e)? {
 }
 
 // ---- typing -----------------------------------------------------------------------------
-
-// trusted: the type of a projection, from the type of the structure (Lean's
-// `inferProj`: the field types of the constructor, instantiated with the
-// parameters and the earlier projections)
-fn proj_type(k : K, e : Expr, n : Name, i : Int, x : Expr, st : Expr) -> Result[Expr, KernelError] {
-  try {
-    Ok(infer_proj(k, e, n, i, x, st))
-  } catch {
-    KernelError(msg) => Err(KernelError(msg))
-  }
-}
 
 fn levels_undef(ls : List[Level], ps : List[Name]) -> Name? {
   match ls {
@@ -457,11 +595,10 @@ enum HasType : (K, Expr, Expr) -> Prop {
     local_value(k, id) === Some(v),
     HasType(k, instantiate1(k, b, x), bt),
   ) : HasType(k, e, mk_pi_fvars(k, [x], cheap_beta_reduce(k, bt)))
-  // trusted: the type of a projection
   TProj[k : K, e : Expr, n : Name, i : Int, x : Expr, st : Expr, t : Expr](
     view(k, e) === VProj(n, i, x),
     HasType(k, x, st),
-    proj_type(k, e, n, i, x, st) === Ok(t),
+    ProjType(k, n, i, x, st, t),
   ) : HasType(k, e, t)
 }
 

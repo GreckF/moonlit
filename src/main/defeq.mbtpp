@@ -284,8 +284,8 @@ fn eta_core_c(k : K, t : Expr, s : Expr) -> Check[DefEq(k, t, s)] raise KernelEr
   if not(is_lam(k, t)) || is_lam(k, s) {
     return Fail
   }
-  match inspect(infer_oracle(k, s)) {
-    MkSing(Ok(ty0), ei) =>
+  match infer_c(k, s) {
+    MkInfOf(ty0, ei) =>
       match whnf_c(k, ty0) {
         MkRedTo(p, pr) =>
           match inspect(view(k, p)) {
@@ -297,7 +297,6 @@ fn eta_core_c(k : K, t : Expr, s : Expr) -> Check[DefEq(k, t, s)] raise KernelEr
             MkSing(_, _) => Fail
           }
       }
-    MkSing(Err(err), _) => raise err
   }
 }
 
@@ -334,10 +333,10 @@ fn struct_args_c(k : K, ind : Name, t : Expr, s : Expr, np : Int) -> Check[Struc
 fn eta_struct_core_c(k : K, t : Expr, s : Expr) -> Check[DefEq(k, t, s)] raise KernelError {
   match inspect(eta_struct_shape(k, s)) {
     MkSing(Some((ind, np)), esh) =>
-      match inspect(infer_oracle(k, t)) {
-        MkSing(Ok(tt), et) =>
-          match inspect(infer_oracle(k, s)) {
-            MkSing(Ok(st), es) =>
+      match infer_c(k, t) {
+        MkInfOf(tt, et) =>
+          match infer_c(k, s) {
+            MkInfOf(st, es) =>
               match is_def_eq_c(k, tt, st) {
                 Holds(q) =>
                   match struct_args_c(k, ind, t, s, np) {
@@ -346,9 +345,7 @@ fn eta_struct_core_c(k : K, t : Expr, s : Expr) -> Check[DefEq(k, t, s)] raise K
                   }
                 Fail => Fail
               }
-            MkSing(Err(err), _) => raise err
           }
-        MkSing(Err(err), _) => raise err
       }
     MkSing(None, _) => Fail
   }
@@ -368,44 +365,39 @@ fn eta_struct_c(k : K, t : Expr, s : Expr) -> Check[DefEq(k, t, s)] raise Kernel
 // ---- proof irrelevance, unit-like types, literals ------------------------------------------
 
 fn proof_irrel_c(k : K, t : Expr, s : Expr) -> DCheck[DefEq(k, t, s)] raise KernelError {
-  match inspect(infer_oracle(k, t)) {
-    MkSing(Ok(p), ep) =>
-      match inspect(prop_oracle(k, p)) {
-        MkSing(Ok(true), eprop) =>
-          match inspect(infer_oracle(k, s)) {
-            MkSing(Ok(q), eq) =>
+  match infer_c(k, t) {
+    MkInfOf(p, ep) =>
+      match is_prop_c(k, p) {
+        Holds(hp) =>
+          match infer_c(k, s) {
+            MkInfOf(q, eq) =>
               match is_def_eq_c(k, p, q) {
-                Holds(d) => DYes(DProofIrrel(ep, eprop, eq, d))
+                Holds(d) => DYes(DProofIrrel(ep, hp, eq, d))
                 Fail => DNo
               }
-            MkSing(Err(err), _) => raise err
           }
-        MkSing(Ok(false), _) => DUndef
-        MkSing(Err(err), _) => raise err
+        Fail => DUndef
       }
-    MkSing(Err(err), _) => raise err
   }
 }
 
 fn unit_like_c(k : K, t : Expr, s : Expr) -> Check[DefEq(k, t, s)] raise KernelError {
-  match inspect(infer_oracle(k, t)) {
-    MkSing(Ok(ty), e1) =>
+  match infer_c(k, t) {
+    MkInfOf(ty, e1) =>
       match whnf_c(k, ty) {
         MkRedTo(tyn, pr) =>
           match reflect(unit_like(k, tyn)) {
             IsTrue(h) =>
-              match inspect(infer_oracle(k, s)) {
-                MkSing(Ok(sy), e2) =>
+              match infer_c(k, s) {
+                MkInfOf(sy, e2) =>
                   match is_def_eq_core_c(k, tyn, sy) {
                     Holds(q) => Holds(DUnit(e1, pr, h, e2, q))
                     Fail => Fail
                   }
-                MkSing(Err(err), _) => raise err
               }
             IsFalse(_) => Fail
           }
       }
-    MkSing(Err(err), _) => raise err
   }
 }
 
