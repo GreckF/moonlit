@@ -10,6 +10,8 @@ options(
     "json.mbtpp",
     "name.mbtpp",
     "level.mbtpp",
+    "level_proof.mbtpp",
+    "nat_proof.mbtpp",
     "expr.mbtpp",
     "env.mbtpp",
     "tc.mbtpp",

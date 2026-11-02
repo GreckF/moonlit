@@ -1,0 +1,215 @@
+// The Nat literal extension computes `Nat.add`, `Nat.sub`, ... on literals
+// with the Prelude's operations (big integers at run time). Here the
+// Prelude's operations are proved equal to the definitions of Lean's core
+// library, which recurse on the second argument:
+//
+//   n + 0 = n         n + succ m = succ (n + m)
+//   n - 0 = n         n - succ m = pred (n - m)
+//   n * 0 = 0         n * succ m = n * m + n
+//   n ^ 0 = 1         n ^ succ m = n ^ m * n
+//   Nat.beq, Nat.ble  by recursion on both arguments
+//
+// `Nat.div`, `Nat.mod`, `Nat.gcd`, `Nat.log2` and the bitwise operations
+// (well-founded recursion in Lean) are not covered.
+//
+// As everywhere in moonlit, the proofs are checked by MoonBit++, whose logic
+// is inconsistent: see the README.
+
+fn lean_nat_add(n : Nat, m : Nat) -> Nat {
+  match m {
+    Z => n
+    S(k) => S(lean_nat_add(n, k))
+  }
+}
+
+fn lean_nat_pred(n : Nat) -> Nat {
+  match n {
+    Z => Z
+    S(k) => k
+  }
+}
+
+fn lean_nat_sub(n : Nat, m : Nat) -> Nat {
+  match m {
+    Z => n
+    S(k) => lean_nat_pred(lean_nat_sub(n, k))
+  }
+}
+
+fn lean_nat_mul(n : Nat, m : Nat) -> Nat {
+  match m {
+    Z => Z
+    S(k) => lean_nat_add(lean_nat_mul(n, k), n)
+  }
+}
+
+fn lean_nat_pow(n : Nat, m : Nat) -> Nat {
+  match m {
+    Z => S(Z)
+    S(k) => lean_nat_mul(lean_nat_pow(n, k), n)
+  }
+}
+
+fn lean_nat_beq(n : Nat, m : Nat) -> Bool {
+  match (n, m) {
+    (Z, Z) => true
+    (Z, S(_)) => false
+    (S(_), Z) => false
+    (S(a), S(b)) => lean_nat_beq(a, b)
+  }
+}
+
+fn lean_nat_ble(n : Nat, m : Nat) -> Bool {
+  match (n, m) {
+    (Z, _) => true
+    (S(_), Z) => false
+    (S(a), S(b)) => lean_nat_ble(a, b)
+  }
+}
+
+// ---- arithmetic of the Prelude's operations ----------------------------------------
+
+lemma add_zero(n : Nat) -> n + Z === n {
+  match n {
+    Z => Refl
+    S(k) => Id::cong(S, add_zero(k))
+  }
+}
+
+lemma add_succ(n : Nat, m : Nat) -> n + S(m) === S(n + m) {
+  match n {
+    Z => Refl
+    S(k) => Id::cong(S, add_succ(k, m))
+  }
+}
+
+lemma add_assoc(a : Nat, b : Nat, c : Nat) -> (a + b) + c === a + (b + c) {
+  match a {
+    Z => Refl
+    S(k) => Id::cong(S, add_assoc(k, b, c))
+  }
+}
+
+lemma add_comm(a : Nat, b : Nat) -> a + b === b + a {
+  match a {
+    Z => Id::sym(add_zero(b))
+    S(k) => Id::trans(Id::cong(S, add_comm(k, b)), Id::sym(add_succ(b, k)))
+  }
+}
+
+lemma mul_zero(n : Nat) -> n * Z === Z {
+  match n {
+    Z => Refl
+    S(k) => mul_zero(k)
+  }
+}
+
+// `n * (m + 1) = n * m + n`
+lemma mul_succ(n : Nat, m : Nat) -> n * S(m) === n * m + n {
+  match n {
+    Z => Refl
+    S(a) => {
+      // (m + 1) + a * (m + 1) = (m + 1) + (a * m + a) = (m + a * m) + (a + 1)
+      let ih = mul_succ(a, m)
+      let s1 = Id::cong(x => S(m) + x, ih)
+      // S(m) + (a*m + a) = S(m + (a*m + a)) = S((m + a*m) + a) = (m + a*m) + S(a)
+      let s2 = Id::cong(S, Id::sym(add_assoc(m, a * m, a)))
+      let s3 = Id::sym(add_succ(m + a * m, a))
+      Id::trans(s1, Id::trans(s2, s3))
+    }
+  }
+}
+
+lemma mul_one(n : Nat) -> n * S(Z) === n {
+  Id::trans(mul_succ(n, Z), Id::cong(x => x + n, mul_zero(n)))
+}
+
+// `pred (n - k) = n - (k + 1)`
+lemma sub_succ(n : Nat, k : Nat) -> lean_nat_pred(n - k) === n - S(k) {
+  match n {
+    Z =>
+      match k {
+        Z => Refl
+        S(_) => Refl
+      }
+    S(a) =>
+      match k {
+        Z => Refl
+        S(j) => sub_succ(a, j)
+      }
+  }
+}
+
+// ---- Lean's definitions are the Prelude's operations --------------------------------
+
+lemma lean_add_eq(n : Nat, m : Nat) -> lean_nat_add(n, m) === n + m {
+  match m {
+    Z => Id::sym(add_zero(n))
+    S(k) => Id::trans(Id::cong(S, lean_add_eq(n, k)), Id::sym(add_succ(n, k)))
+  }
+}
+
+lemma lean_sub_eq(n : Nat, m : Nat) -> lean_nat_sub(n, m) === n - m {
+  match m {
+    Z =>
+      match n {
+        Z => Refl
+        S(_) => Refl
+      }
+    S(k) => Id::trans(Id::cong(lean_nat_pred, lean_sub_eq(n, k)), sub_succ(n, k))
+  }
+}
+
+lemma lean_mul_eq(n : Nat, m : Nat) -> lean_nat_mul(n, m) === n * m {
+  match m {
+    Z => Id::sym(mul_zero(n))
+    S(k) => {
+      // lean_add(lean_mul(n, k), n) = n * k + n = n * (k + 1)
+      let a = lean_add_eq(lean_nat_mul(n, k), n)
+      let b = Id::cong(x => x + n, lean_mul_eq(n, k))
+      Id::trans(a, Id::trans(b, Id::sym(mul_succ(n, k))))
+    }
+  }
+}
+
+lemma mul_comm(a : Nat, b : Nat) -> a * b === b * a {
+  match a {
+    Z => Id::sym(mul_zero(b))
+    S(k) =>
+      // (k + 1) * b = b + k * b = b + b * k = b * k + b = b * (k + 1)
+      Id::trans(
+        Id::cong(x => b + x, mul_comm(k, b)),
+        Id::trans(add_comm(b, b * k), Id::sym(mul_succ(b, k))),
+      )
+  }
+}
+
+lemma lean_pow_eq(n : Nat, m : Nat) -> lean_nat_pow(n, m) === n.pow(m) {
+  match m {
+    Z => Refl
+    S(k) => {
+      // lean_mul(lean_pow(n, k), n) = n.pow(k) * n = n * n.pow(k)
+      let a = lean_mul_eq(lean_nat_pow(n, k), n)
+      let b = Id::cong(x => x * n, lean_pow_eq(n, k))
+      Id::trans(a, Id::trans(b, mul_comm(n.pow(k), n)))
+    }
+  }
+}
+
+lemma lean_beq_eq(n : Nat, m : Nat) -> lean_nat_beq(n, m) === (n == m) {
+  match (n, m) {
+    (Z, Z) => Refl
+    (Z, S(_)) => Refl
+    (S(_), Z) => Refl
+    (S(a), S(b)) => lean_beq_eq(a, b)
+  }
+}
+
+lemma lean_ble_eq(n : Nat, m : Nat) -> lean_nat_ble(n, m) === (n <= m) {
+  match (n, m) {
+    (Z, Z) => Refl
+    (Z, S(_)) => Refl
+    (S(_), Z) => Refl
+    (S(a), S(b)) => lean_ble_eq(a, b)
+  }
+}

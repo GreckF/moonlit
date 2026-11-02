@@ -1,0 +1,207 @@
+tests/arena/bad/bugs/closure-level-subst.ndjson	REJECT	REJECT	0.3	line 53: declaration type mismatch: 'lower'
+tests/arena/bad/bugs/constlevels.ndjson	REJECT	REJECT	0.4	line 283: let type mismatch: x
+tests/arena/bad/bugs/ctor-num-fields.ndjson	REJECT	REJECT	0.3	line 235: invalid constructor '_private.Test.0.S.mk'
+tests/arena/bad/bugs/eta-ctor-alias.ndjson	REJECT	REJECT	0.3	line 122: declaration type mismatch: 'etaCtorAlias'
+tests/arena/bad/bugs/forged-quot-ind.ndjson	REJECT	REJECT	0.3	line 170: already declared: 'Quot'
+tests/arena/bad/bugs/k-rec-conv.ndjson	REJECT	REJECT	0.4	line 232: declaration type mismatch: 'bad'
+tests/arena/bad/bugs/large-elim-param.ndjson	REJECT	REJECT	0.3	line 86: invalid recursor 'MyBool.rec'
+tests/arena/bad/bugs/large-elim-prop-bool.ndjson	REJECT	REJECT	0.4	line 307: invalid recursor 'NewBool.rec'
+tests/arena/bad/bugs/level-imax-leq.ndjson	REJECT	REJECT	0.3	line 69: invalid recursor 'False.rec'
+tests/arena/bad/bugs/level-imax-normalization.ndjson	REJECT	REJECT	0.3	line 77: declaration type mismatch: 'down'
+tests/arena/bad/bugs/loose-bvar-value.ndjson	REJECT	REJECT	0.3	line 9: type checker does not support loose bound variables
+tests/arena/bad/bugs/nat-rec-k-lie.ndjson	REJECT	REJECT	0.4	line 59: invalid recursor 'Nat.rec' (fields or rules differ)
+tests/arena/bad/bugs/nat-rec-rules.ndjson	REJECT	REJECT	0.4	line 91: invalid recursor 'False.rec'
+tests/arena/bad/bugs/nested-name-capture.ndjson	REJECT	REJECT	0.4	line 394: invalid recursor 'Shadow.rec' (fields or rules differ)
+tests/arena/bad/bugs/nested-rec-rule-nfields.ndjson	REJECT	REJECT	0.4	line 651: invalid recursor 'T.rec' (fields or rules differ)
+tests/arena/bad/bugs/nested-unused-param.ndjson	REJECT	REJECT	0.4	line 1036: invalid projection: _fv392.C.0
+tests/arena/bad/bugs/orphan-rec.ndjson	REJECT	REJECT	0.4	line 18: no such recursor 'rogue'
+tests/arena/bad/bugs/pi-closure-context.ndjson	REJECT	REJECT	0.3	line 23: declaration type mismatch: 'bad'
+tests/arena/bad/bugs/proj-non-structure.ndjson	REJECT	REJECT	0.3	line 75: invalid projection: (Bad.mk2 True.intro).Bad.0
+tests/arena/bad/bugs/proj-of-imax-prop.ndjson	REJECT	REJECT	0.4	line 245: invalid projection: _fv76.ImaxProp.0
+tests/arena/bad/bugs/proj-of-stuck-prop.ndjson	REJECT	REJECT	0.6	line 5239: invalid projection: _fv2119.Native64ResultSortOwner.0
+tests/arena/bad/bugs/proj-of-subst-prop.ndjson	REJECT	REJECT	0.6	line 4827: type expected: (PR14806Subst.Owner PR14806Subst.witness)
+tests/arena/bad/bugs/rec-k-lie.ndjson	REJECT	REJECT	0.3	line 35: invalid recursor 'MyBool.rec' (fields or rules differ)
+tests/arena/bad/bugs/rec-missing-ih.ndjson	REJECT	REJECT	0.6	line 4811: invalid recursor 'Native64TwoHashOwner.rec' (fields or rules differ)
+tests/arena/bad/bugs/rec-of-subst-prop.ndjson	REJECT	REJECT	0.6	line 5090: function expected: (((Issue.identityValue Empty) ((((Issue.Owner.rec Issue.gateWitness) (fun major : Issue.proposition => (Issue.Fiber Empty))) (Issue.transport Empty)) ((Issue.delayedOwner _fv2040) ((Issue.Owner.mk Issue.gateWitness) Empty)))) (((Issue.identityValue Unit) ((((Issue.Owner.rec Issue.gateWitness) (fun major : Issue.proposition => (Issue.Fiber Unit))) (Issue.transport Unit)) ((Issue.delayedOwner _fv2040) ((Issue.Owner.mk Issue.gateWitness) Unit)))) Unit.unit))
+tests/arena/bad/bugs/unit-rec-rule.ndjson	REJECT	REJECT	0.3	line 26: invalid recursor 'PUnit.rec' (fields or rules differ)
+tests/arena/bad/other/extra-rec.ndjson	REJECT	REJECT	0.3	line 18: no such recursor 'rogue'
+tests/arena/bad/other/inductive-undeclared-universe.ndjson	REJECT	REJECT	0.4	line 38: undefined universe level parameter 'u'
+tests/arena/bad/other/nat-lit-add-bad.ndjson	REJECT	REJECT	0.4	line 465: declaration type mismatch: 'natAddLitBad'
+tests/arena/bad/other/orphan-ctor.ndjson	REJECT	REJECT	0.3	line 19: constructor 'rogue' does not belong to the declaration
+tests/arena/bad/other/proj-of-prop.ndjson	REJECT	REJECT	0.3	line 56: application type mismatch: (Wrapper.mk True.intro)
+tests/arena/bad/perf/refute-cheap-first.ndjson	REJECT	REJECT	0.4	line 439: declaration type mismatch: 'kernel_refute_cheap_first'
+tests/arena/bad/perf/refute-cheap-last.ndjson	REJECT	REJECT	0.5	line 439: declaration type mismatch: 'kernel_refute_cheap_last'
+tests/arena/bad/tutorial/002_badDef.ndjson	REJECT	REJECT	0.3	line 6: declaration type mismatch: 'badDef'
+tests/arena/bad/tutorial/009_forallSortBad.ndjson	REJECT	REJECT	0.2	line 26: type expected: _fv5
+tests/arena/bad/tutorial/010_nonTypeType.ndjson	REJECT	REJECT	0.3	line 21: type expected: constType
+tests/arena/bad/tutorial/011_nonTypeAxiom.ndjson	REJECT	REJECT	0.3	line 20: type expected: constType
+tests/arena/bad/tutorial/012_nonPropThm.ndjson	REJECT	REJECT	0.3	line 7: theorem type is not Prop: 'nonPropThm'
+tests/arena/bad/tutorial/014_selfProof.ndjson	REJECT	REJECT	0.2	line 8: unknown constant 'selfProof'
+tests/arena/bad/tutorial/019_tut06_bad01.ndjson	REJECT	REJECT	0.3	line 8: duplicate universe level parameter 'u'
+tests/arena/bad/tutorial/046_inductBadNonSort.ndjson	REJECT	REJECT	0.2	line 20: type expected: (fun x : Sort (0+1) => (fun y : Sort (0+1) => #1))
+tests/arena/bad/tutorial/047_inductBadNonSort2.ndjson	REJECT	REJECT	0.2	line 8: type expected: aType
+tests/arena/bad/tutorial/048_inductLevelParam.ndjson	REJECT	REJECT	0.2	line 7: duplicate universe level parameter 'u'
+tests/arena/bad/tutorial/049_inductTooFewParams.ndjson	REJECT	REJECT	0.2	line 6: invalid inductive datatype declaration, incorrect number of parameters
+tests/arena/bad/tutorial/050_inductWrongCtorParams.ndjson	REJECT	REJECT	0.2	line 16: arg #1 of 'inductWrongCtorParams.mk' does not match inductive datatype parameters
+tests/arena/bad/tutorial/051_inductWrongCtorResParams.ndjson	REJECT	REJECT	0.3	line 19: invalid return type for 'inductWrongCtorResParams.mk'
+tests/arena/bad/tutorial/052_inductWrongCtorResLevel.ndjson	REJECT	REJECT	0.2	line 23: invalid return type for 'inductWrongCtorResLevel.mk'
+tests/arena/bad/tutorial/053_inductInIndex.ndjson	REJECT	REJECT	0.2	line 14: invalid return type for 'inductInIndex.mk'
+tests/arena/bad/tutorial/054_indNeg.ndjson	REJECT	REJECT	0.2	line 12: arg #1 of 'indNeg.mk' has a non positive occurrence of the datatypes being declared
+tests/arena/bad/tutorial/056_reduceCtorType.mk.ndjson	REJECT	REJECT	0.2	line 26: invalid return type for 'reduceCtorType.mk'
+tests/arena/bad/tutorial/057_indNegReducible.ndjson	REJECT	REJECT	0.3	line 31: arg #1 of 'indNegReducible.mk' has a non positive occurrence of the datatypes being declared
+tests/arena/bad/tutorial/061_typeWithTooHighTypeField.mk.ndjson	REJECT	REJECT	0.2	line 11: universe level of type_of(arg #1) of 'typeWithTooHighTypeField.mk' is too big for the corresponding inductive datatype
+tests/arena/bad/tutorial/073_BogusRecursor.ndjson	REJECT	REJECT	0.3	line 24: invalid recursor 'BogusRecursor.rec'
+tests/arena/bad/tutorial/087_projOutOfRange.ndjson	REJECT	REJECT	0.3	line 67: invalid projection: _fv30.And.2
+tests/arena/bad/tutorial/088_projNotStruct.ndjson	REJECT	REJECT	0.2	line 64: invalid projection: _fv10.N.0
+tests/arena/bad/tutorial/090_projProp2.ndjson	REJECT	REJECT	0.3	line 143: invalid projection: _fv55.PropStructure.1
+tests/arena/bad/tutorial/092_projProp4.ndjson	REJECT	REJECT	0.3	line 143: invalid projection: _fv55.PropStructure.3
+tests/arena/bad/tutorial/093_projProp5.ndjson	REJECT	REJECT	0.3	line 148: invalid projection: _fv54.PropStructure.3
+tests/arena/bad/tutorial/094_projProp6.ndjson	REJECT	REJECT	0.3	line 143: invalid projection: _fv55.PropStructure.5
+tests/arena/bad/tutorial/096_projIndexData.ndjson	REJECT	REJECT	0.3	line 226: invalid projection: _fv83.PropStructure.0
+tests/arena/bad/tutorial/097_projIndexData2.ndjson	REJECT	REJECT	0.3	line 226: invalid projection: _fv83.PropStructure.1
+tests/arena/bad/tutorial/100_ruleKbad.ndjson	REJECT	REJECT	0.3	line 121: declaration type mismatch: 'ruleKbad'
+tests/arena/bad/tutorial/101_ruleKAcc.ndjson	REJECT	REJECT	0.3	line 229: declaration type mismatch: 'ruleKAcc'
+tests/arena/bad/tutorial/105_proofIrrelevanceBad.ndjson	REJECT	REJECT	0.3	line 93: declaration type mismatch: 'proofIrrelevanceBad'
+tests/arena/bad/tutorial/111_indexedUnitEta.ndjson	REJECT	REJECT	0.3	line 121: declaration type mismatch: 'indexedUnitEta'
+tests/arena/bad/tutorial/113_indexedStructEta.ndjson	REJECT	REJECT	0.3	line 138: declaration type mismatch: 'indexedStructEta'
+tests/arena/bad/tutorial/116_funEtaBad.ndjson	REJECT	REJECT	0.3	line 97: declaration type mismatch: 'funEtaBad'
+tests/arena/bad/tutorial/117_reflOccLeft.ndjson	REJECT	REJECT	0.2	line 61: arg #1 of 'reflOccLeft.mk' has a non positive occurrence of the datatypes being declared
+tests/arena/bad/tutorial/118_reflOccInIndex.ndjson	REJECT	REJECT	0.3	line 66: application type mismatch: (reflOccInIndex _fv12)
+tests/arena/bad/tutorial/125_accRecNoEta.ndjson	REJECT	REJECT	0.3	line 235: declaration type mismatch: 'accRecNoEta'
+tests/arena/bad/tutorial/132_dup_defs.ndjson	REJECT	REJECT	0.2	line 7: already declared: 'dup_defs'
+tests/arena/bad/tutorial/133_dup_ind_def.ndjson	REJECT	REJECT	0.3	line 27: already declared: 'dup_ind_def'
+tests/arena/bad/tutorial/134_dup_ctor_def.ndjson	REJECT	REJECT	0.2	line 27: already declared: 'dup_ctor_def.mk'
+tests/arena/bad/tutorial/135_dup_rec_def.ndjson	REJECT	REJECT	0.2	line 27: already declared: 'dup_rec_def.rec'
+tests/arena/bad/tutorial/136_misnamed_rec_user.ndjson	REJECT	REJECT	0.3	line 25: no such recursor 'misnamed_rec.not_rec'
+tests/arena/bad/tutorial/137_dup_rec_def2.ndjson	REJECT	REJECT	0.2	line 28: already declared: 'dup_rec_def2.rec'
+tests/arena/bad/tutorial/138_dup_ctor_rec.ndjson	REJECT	REJECT	0.3	line 24: already declared: 'dup_ctor_rec.rec'
+tests/arena/bad/tutorial/139_DupConCon.ndjson	REJECT	REJECT	0.2	line 34: duplicate constructor 'dup_ind_con_con.mk'
+tests/arena/bad/tutorial/140_falseFromUnsafe.ndjson	REJECT	REJECT	0.2	line 22: invalid declaration, it uses unsafe declaration 'unsafeLoop'
+tests/arena/bad/tutorial/141_falseFromPartial.ndjson	REJECT	REJECT	0.2	line 20: unknown constant 'partialLoop'
+tests/arena/good/corner-cases/proof-param-ok.ndjson	ACCEPT	ACCEPT	0.3	1
+tests/arena/good/init-prelude.ndjson	ACCEPT	ACCEPT	1.5	1821
+tests/arena/good/other/level-index-out-of-order.ndjson	ACCEPT	ACCEPT	0.2	1
+tests/arena/good/other/nat-lit-add.ndjson	ACCEPT	ACCEPT	0.3	16
+tests/arena/good/other/nat-lit-ble.ndjson	ACCEPT	ACCEPT	0.3	17
+tests/arena/good/other/nat-lit-sub.ndjson	ACCEPT	ACCEPT	0.3	20
+tests/arena/good/other/sparse-name-index.ndjson	ACCEPT	ACCEPT	0.2	1
+tests/arena/good/perf/app-lam.ndjson	ACCEPT	TIMEOUT	60.1	
+tests/arena/good/perf/args-before-unfold.ndjson	ACCEPT	ACCEPT	0.4	5
+tests/arena/good/perf/beta-ladder.ndjson	ACCEPT	ACCEPT	14.7	12
+tests/arena/good/perf/church-numerals.ndjson	ACCEPT	ACCEPT	0.6	4
+tests/arena/good/perf/discarded-argument-match.ndjson	ACCEPT	ACCEPT	0.9	17
+tests/arena/good/perf/discarded-argument.ndjson	ACCEPT	ACCEPT	0.5	6
+tests/arena/good/perf/folded-constant-first.ndjson	ACCEPT	ACCEPT	0.4	9
+tests/arena/good/perf/folded-constant-last.ndjson	ACCEPT	ACCEPT	0.4	9
+tests/arena/good/perf/fueled-chain.ndjson	ACCEPT	ACCEPT	0.7	140
+tests/arena/good/perf/grind-ring-5.ndjson	ACCEPT	ACCEPT	11.4	2270
+tests/arena/good/perf/identical-nesting.ndjson	ACCEPT	ACCEPT	0.3	8
+tests/arena/good/perf/irrelevance-before-evaluation.ndjson	ACCEPT	ACCEPT	0.3	7
+tests/arena/good/perf/irrelevance-refutes.ndjson	ACCEPT	ACCEPT	0.3	9
+tests/arena/good/perf/let-fold.ndjson	ACCEPT	ACCEPT	0.5	156
+tests/arena/good/perf/let-ladder.ndjson	ACCEPT	ACCEPT	6.0	14
+tests/arena/good/perf/magma-list-deep-n21.ndjson	ACCEPT	TIMEOUT	60.2	
+tests/arena/good/perf/magma-list-deep-n36.ndjson	ACCEPT	TIMEOUT	60.2	
+tests/arena/good/perf/magma-list-pair-n21.ndjson	ACCEPT	TIMEOUT	60.2	
+tests/arena/good/perf/magma-list-pair-n7.ndjson	ACCEPT	ACCEPT	53.0	276
+tests/arena/good/perf/proj-cheap-struct.ndjson	ACCEPT	ACCEPT	0.6	57
+tests/arena/good/perf/proj-lazy-struct.ndjson	ACCEPT	ACCEPT	1.0	31
+tests/arena/good/perf/proj-stuck-struct.ndjson	ACCEPT	ACCEPT	0.7	34
+tests/arena/good/perf/repeated-subproblem.ndjson	ACCEPT	ACCEPT	0.6	5
+tests/arena/good/perf/shared-subterm.ndjson	ACCEPT	ACCEPT	1.0	8
+tests/arena/good/perf/shift-cascade.ndjson	ACCEPT	ACCEPT	0.8	5
+tests/arena/good/perf/unroll-versus-evaluate.ndjson	ACCEPT	ACCEPT	0.5	5
+tests/arena/good/tutorial/001_basicDef.ndjson	ACCEPT	ACCEPT	0.5	1
+tests/arena/good/tutorial/003_arrowType.ndjson	ACCEPT	ACCEPT	0.3	1
+tests/arena/good/tutorial/004_dependentType.ndjson	ACCEPT	ACCEPT	0.4	1
+tests/arena/good/tutorial/005_constType.ndjson	ACCEPT	ACCEPT	0.5	1
+tests/arena/good/tutorial/006_betaReduction.ndjson	ACCEPT	ACCEPT	0.6	2
+tests/arena/good/tutorial/007_betaReduction2.ndjson	ACCEPT	ACCEPT	0.5	2
+tests/arena/good/tutorial/008_forallSortWhnf.ndjson	ACCEPT	ACCEPT	0.5	2
+tests/arena/good/tutorial/013_thmProof.ndjson	ACCEPT	ACCEPT	1.2	2
+tests/arena/good/tutorial/015_levelComp1.ndjson	ACCEPT	ACCEPT	0.4	1
+tests/arena/good/tutorial/016_levelComp2.ndjson	ACCEPT	ACCEPT	0.6	1
+tests/arena/good/tutorial/017_levelComp3.ndjson	ACCEPT	ACCEPT	0.4	1
+tests/arena/good/tutorial/018_levelParams.ndjson	ACCEPT	ACCEPT	0.4	2
+tests/arena/good/tutorial/020_levelComp4.ndjson	ACCEPT	ACCEPT	0.6	1
+tests/arena/good/tutorial/021_levelComp5.ndjson	ACCEPT	ACCEPT	0.5	1
+tests/arena/good/tutorial/022_imax1.ndjson	ACCEPT	ACCEPT	0.5	1
+tests/arena/good/tutorial/023_imax2.ndjson	ACCEPT	ACCEPT	0.3	1
+tests/arena/good/tutorial/024_levelMaxComm.ndjson	ACCEPT	ACCEPT	0.4	1
+tests/arena/good/tutorial/025_levelMaxAssoc.ndjson	ACCEPT	ACCEPT	0.4	1
+tests/arena/good/tutorial/026_levelMaxIdem.ndjson	ACCEPT	ACCEPT	0.5	1
+tests/arena/good/tutorial/027_levelMaxAbsorb.ndjson	ACCEPT	ACCEPT	0.5	1
+tests/arena/good/tutorial/028_inferVar.ndjson	ACCEPT	ACCEPT	0.4	1
+tests/arena/good/tutorial/029_defEqLambda.ndjson	ACCEPT	ACCEPT	0.3	1
+tests/arena/good/tutorial/030_peano1.ndjson	ACCEPT	ACCEPT	0.5	7
+tests/arena/good/tutorial/031_peano2.ndjson	ACCEPT	ACCEPT	0.4	8
+tests/arena/good/tutorial/032_peano3.ndjson	ACCEPT	ACCEPT	0.3	10
+tests/arena/good/tutorial/033_letType.ndjson	ACCEPT	ACCEPT	0.5	1
+tests/arena/good/tutorial/034_letTypeDep.ndjson	ACCEPT	ACCEPT	0.3	3
+tests/arena/good/tutorial/035_letRed.ndjson	ACCEPT	ACCEPT	0.3	2
+tests/arena/good/tutorial/036_empty.ndjson	ACCEPT	ACCEPT	0.6	2
+tests/arena/good/tutorial/037_boolType.ndjson	ACCEPT	ACCEPT	0.4	2
+tests/arena/good/tutorial/038_twoBool.ndjson	ACCEPT	ACCEPT	0.4	3
+tests/arena/good/tutorial/039_andType.ndjson	ACCEPT	ACCEPT	0.4	2
+tests/arena/good/tutorial/040_prodType.ndjson	ACCEPT	ACCEPT	0.5	2
+tests/arena/good/tutorial/041_pprodType.ndjson	ACCEPT	ACCEPT	0.5	2
+tests/arena/good/tutorial/042_pUnitType.ndjson	ACCEPT	ACCEPT	0.4	2
+tests/arena/good/tutorial/043_eqType.ndjson	ACCEPT	ACCEPT	0.4	2
+tests/arena/good/tutorial/044_natDef.ndjson	ACCEPT	ACCEPT	0.5	2
+tests/arena/good/tutorial/045_rbTreeDef.ndjson	ACCEPT	ACCEPT	0.4	4
+tests/arena/good/tutorial/055_reduceCtorParam.mk.ndjson	ACCEPT	ACCEPT	0.4	3
+tests/arena/good/tutorial/058_predWithTypeField.ndjson	ACCEPT	ACCEPT	0.5	2
+tests/arena/good/tutorial/059_typeWithTypeField.ndjson	ACCEPT	ACCEPT	1.0	2
+tests/arena/good/tutorial/060_typeWithTypeFieldPoly.ndjson	ACCEPT	ACCEPT	0.5	2
+tests/arena/good/tutorial/062_emptyRec.ndjson	ACCEPT	ACCEPT	0.5	2
+tests/arena/good/tutorial/063_boolRec.ndjson	ACCEPT	ACCEPT	0.4	2
+tests/arena/good/tutorial/064_twoBoolRec.ndjson	ACCEPT	ACCEPT	0.4	3
+tests/arena/good/tutorial/065_andRec.ndjson	ACCEPT	ACCEPT	0.4	2
+tests/arena/good/tutorial/066_prodRec.ndjson	ACCEPT	ACCEPT	0.4	2
+tests/arena/good/tutorial/067_pprodRec.ndjson	ACCEPT	ACCEPT	0.4	2
+tests/arena/good/tutorial/068_punitRec.ndjson	ACCEPT	ACCEPT	0.4	2
+tests/arena/good/tutorial/069_eqRec.ndjson	ACCEPT	ACCEPT	0.4	2
+tests/arena/good/tutorial/070_nRec.ndjson	ACCEPT	ACCEPT	0.4	2
+tests/arena/good/tutorial/071_rbTreeRef.ndjson	ACCEPT	ACCEPT	0.4	4
+tests/arena/good/tutorial/072_boolPropRec.ndjson	ACCEPT	ACCEPT	0.4	2
+tests/arena/good/tutorial/074_existsRec.ndjson	ACCEPT	ACCEPT	0.4	2
+tests/arena/good/tutorial/075_typeSingletonRecReduction.ndjson	ACCEPT	ACCEPT	0.4	5
+tests/arena/good/tutorial/076_sortElimPropRec.ndjson	ACCEPT	ACCEPT	0.4	3
+tests/arena/good/tutorial/077_sortElimProp2Rec.ndjson	ACCEPT	ACCEPT	0.4	4
+tests/arena/good/tutorial/078_boolRecEqns.ndjson	ACCEPT	ACCEPT	0.5	4
+tests/arena/good/tutorial/079_prodRecEqns.ndjson	ACCEPT	ACCEPT	0.6	3
+tests/arena/good/tutorial/080_nRecReduction.ndjson	ACCEPT	ACCEPT	0.5	6
+tests/arena/good/tutorial/081_listRecReduction.ndjson	ACCEPT	ACCEPT	0.6	7
+tests/arena/good/tutorial/082_RBTree.id_spec.ndjson	ACCEPT	ACCEPT	0.6	7
+tests/arena/good/tutorial/083_And.right.ndjson	ACCEPT	ACCEPT	0.5	3
+tests/arena/good/tutorial/084_Prod.snd.ndjson	ACCEPT	ACCEPT	0.5	3
+tests/arena/good/tutorial/085_PProd.snd.ndjson	ACCEPT	ACCEPT	0.6	3
+tests/arena/good/tutorial/086_PSigma.snd.ndjson	ACCEPT	ACCEPT	0.5	3
+tests/arena/good/tutorial/089_projProp1.ndjson	ACCEPT	ACCEPT	0.5	4
+tests/arena/good/tutorial/091_projProp3.ndjson	ACCEPT	ACCEPT	0.5	4
+tests/arena/good/tutorial/095_projDataIndexRec.ndjson	ACCEPT	ACCEPT	0.4	4
+tests/arena/good/tutorial/098_projRed.ndjson	ACCEPT	ACCEPT	0.4	6
+tests/arena/good/tutorial/099_ruleK.ndjson	ACCEPT	ACCEPT	0.4	3
+tests/arena/good/tutorial/102_aNatLit.ndjson	ACCEPT	ACCEPT	0.4	2
+tests/arena/good/tutorial/103_natLitEq.ndjson	ACCEPT	ACCEPT	0.5	3
+tests/arena/good/tutorial/104_proofIrrelevance.ndjson	ACCEPT	ACCEPT	0.4	3
+tests/arena/good/tutorial/106_proofIrrelevanceWhnf.ndjson	ACCEPT	ACCEPT	0.5	4
+tests/arena/good/tutorial/107_proofIrrelevanceUnderBinder.ndjson	ACCEPT	ACCEPT	0.4	7
+tests/arena/good/tutorial/108_unitEta1.ndjson	ACCEPT	ACCEPT	0.4	5
+tests/arena/good/tutorial/109_unitEta2.ndjson	ACCEPT	ACCEPT	0.5	4
+tests/arena/good/tutorial/110_unitEta3.ndjson	ACCEPT	ACCEPT	0.5	4
+tests/arena/good/tutorial/112_structEta.ndjson	ACCEPT	ACCEPT	0.6	7
+tests/arena/good/tutorial/114_funEta.ndjson	ACCEPT	ACCEPT	0.5	3
+tests/arena/good/tutorial/115_funEtaDep.ndjson	ACCEPT	ACCEPT	0.6	3
+tests/arena/good/tutorial/119_reduceCtorParamRefl.mk.ndjson	ACCEPT	ACCEPT	0.5	3
+tests/arena/good/tutorial/120_reduceCtorParamRefl2.mk.ndjson	ACCEPT	ACCEPT	0.4	3
+tests/arena/good/tutorial/121_rTreeRec.ndjson	ACCEPT	ACCEPT	0.4	3
+tests/arena/good/tutorial/122_rtreeRecReduction.ndjson	ACCEPT	ACCEPT	0.4	6
+tests/arena/good/tutorial/123_accRecType.ndjson	ACCEPT	ACCEPT	0.4	2
+tests/arena/good/tutorial/124_accRecReduction.ndjson	ACCEPT	ACCEPT	0.4	4
+tests/arena/good/tutorial/126_quotMkType.ndjson	ACCEPT	ACCEPT	0.4	3
+tests/arena/good/tutorial/127_quotIndType.ndjson	ACCEPT	ACCEPT	0.4	3
+tests/arena/good/tutorial/128_quotLiftType.ndjson	ACCEPT	ACCEPT	0.5	3
+tests/arena/good/tutorial/129_quotSoundType.ndjson	ACCEPT	ACCEPT	0.5	4
+tests/arena/good/tutorial/130_quotLiftReduction.ndjson	ACCEPT	ACCEPT	0.5	3
+tests/arena/good/tutorial/131_quotIndReduction.ndjson	ACCEPT	ACCEPT	0.4	3

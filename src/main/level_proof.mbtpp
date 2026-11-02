@@ -1,0 +1,1093 @@
+// A decision procedure for `<=` on universe levels, with its soundness proof.
+//
+// Levels here have numbered parameters (lean4lean's `Level`); `ev(l, rho)`
+// is the value of `l` under an assignment `rho` of natural numbers to the
+// parameters, and `LevelLE(a, b)` says `ev(a, rho) <= ev(b, rho)` for every
+// `rho`. `vleq(a, b)` returns a proof of `LevelLE(a, b)` or fails; it fails
+// only when the inequality does not hold (completeness is not proved).
+//
+// The procedure: case split on every parameter in the second argument of an
+// `imax` (it is either 0 or a successor), after which each `imax` has an
+// argument known to be zero or nonzero; then flatten both sides to
+// `max(c, p + k, ...)` and compare entry by entry.
+//
+// The proofs are checked by MoonBit++, whose logic is inconsistent
+// (`Type : Type`, no termination check): see the README.
+
+// ---- natural numbers: order, max, imax ------------------------------------------
+
+enum NatLe : (Nat, Nat) -> Prop {
+  LeZ[n : Nat] : NatLe(Z, n)
+  LeS[m : Nat, n : Nat](NatLe(m, n)) : NatLe(S(m), S(n))
+}
+
+fn nmax(a : Nat, b : Nat) -> Nat {
+  match (a, b) {
+    (Z, _) => b
+    (S(_), Z) => a
+    (S(x), S(y)) => S(nmax(x, y))
+  }
+}
+
+fn nimax(a : Nat, b : Nat) -> Nat {
+  match b {
+    Z => Z
+    S(_) => nmax(a, b)
+  }
+}
+
+// `x + k`, by recursion on `k`
+fn addk(x : Nat, k : Nat) -> Nat {
+  match k {
+    Z => x
+    S(j) => S(addk(x, j))
+  }
+}
+
+lemma le_refl(n : Nat) -> NatLe(n, n) {
+  match n {
+    Z => LeZ
+    S(m) => LeS(le_refl(m))
+  }
+}
+
+lemma le_trans[a : Nat, b : Nat, c : Nat](p : NatLe(a, b), q : NatLe(b, c)) -> NatLe(a, c) {
+  match (p, q) {
+    (LeZ, _) => LeZ
+    (LeS(p2), LeS(q2)) => LeS(le_trans(p2, q2))
+  }
+}
+
+// rewriting the sides of an inequality
+lemma le_rw_r[a : Nat, b : Nat, c : Nat](e : b === c, p : NatLe(a, b)) -> NatLe(a, c) {
+  match e {
+    Refl => p
+  }
+}
+
+lemma le_rw_l[a : Nat, b : Nat, c : Nat](e : a === b, p : NatLe(a, c)) -> NatLe(b, c) {
+  match e {
+    Refl => p
+  }
+}
+
+lemma le_of_eq[a : Nat, b : Nat](e : a === b) -> NatLe(a, b) {
+  match e {
+    Refl => le_refl(a)
+  }
+}
+
+lemma le_max_l(a : Nat, b : Nat) -> NatLe(a, nmax(a, b)) {
+  match (a, b) {
+    (Z, _) => LeZ
+    (S(x), Z) => le_refl(S(x))
+    (S(x), S(y)) => LeS(le_max_l(x, y))
+  }
+}
+
+lemma le_max_r(a : Nat, b : Nat) -> NatLe(b, nmax(a, b)) {
+  match (a, b) {
+    (Z, _) => le_refl(b)
+    (S(_), Z) => LeZ
+    (S(x), S(y)) => LeS(le_max_r(x, y))
+  }
+}
+
+lemma max_le[a : Nat, b : Nat, c : Nat](p : NatLe(a, c), q : NatLe(b, c)) -> NatLe(nmax(a, b), c) {
+  match (p, q) {
+    (LeZ, _) => q
+    (LeS(p2), LeZ) => LeS(p2)
+    (LeS(p2), LeS(q2)) => LeS(max_le(p2, q2))
+  }
+}
+
+lemma max_mono[a : Nat, b : Nat, c : Nat, d : Nat](p : NatLe(a, c), q : NatLe(b, d)) -> NatLe(nmax(a, b), nmax(c, d)) {
+  max_le(le_trans(p, le_max_l(c, d)), le_trans(q, le_max_r(c, d)))
+}
+
+lemma k_le_addk(x : Nat, k : Nat) -> NatLe(k, addk(x, k)) {
+  match k {
+    Z => LeZ
+    S(j) => LeS(k_le_addk(x, j))
+  }
+}
+
+lemma addk_mono_l[x : Nat, y : Nat](p : NatLe(x, y), k : Nat) -> NatLe(addk(x, k), addk(y, k)) {
+  match k {
+    Z => p
+    S(j) => LeS(addk_mono_l(p, j))
+  }
+}
+
+lemma addk_mono_r[j : Nat, k : Nat](x : Nat, p : NatLe(j, k)) -> NatLe(addk(x, j), addk(x, k)) {
+  match p {
+    LeZ => addk_ge(x, k)
+    LeS(q) => LeS(addk_mono_r(x, q))
+  }
+}
+
+lemma addk_ge(x : Nat, k : Nat) -> NatLe(x, addk(x, k)) {
+  match k {
+    Z => le_refl(x)
+    S(j) => le_trans(addk_ge(x, j), le_succ(addk(x, j)))
+  }
+}
+
+lemma le_succ(n : Nat) -> NatLe(n, S(n)) {
+  match n {
+    Z => LeZ
+    S(m) => LeS(le_succ(m))
+  }
+}
+
+// `(x + 1) + k = x + (k + 1)`
+lemma addk_succ(x : Nat, k : Nat) -> addk(S(x), k) === addk(x, S(k)) {
+  match k {
+    Z => Refl
+    S(j) => Id::cong(S, addk_succ(x, j))
+  }
+}
+
+// `max(x, y) + k = max(x + k, y + k)`
+lemma addk_max(x : Nat, y : Nat, k : Nat) -> addk(nmax(x, y), k) === nmax(addk(x, k), addk(y, k)) {
+  match k {
+    Z => Refl
+    S(j) => {
+      let ih = addk_max(x, y, j)
+      // max(S a, S b) = S (max a b)
+      Id::trans(Id::cong(S, ih), max_succ(addk(x, j), addk(y, j)))
+    }
+  }
+}
+
+lemma max_succ(a : Nat, b : Nat) -> S(nmax(a, b)) === nmax(S(a), S(b)) {
+  Refl
+}
+
+lemma max_z_r(a : Nat) -> nmax(a, Z) === a {
+  match a {
+    Z => Refl
+    S(_) => Refl
+  }
+}
+// ---- the semantics of levels ---------------------------------------------------
+
+fn ev(l : Level, rho : (Name) -> Nat) -> Nat {
+  match l {
+    Zero => Z
+    Succ(u) => S(ev(u, rho))
+    Max(a, b) => nmax(ev(a, rho), ev(b, rho))
+    IMax(a, b) => nimax(ev(a, rho), ev(b, rho))
+    Param(p) => rho(p)
+  }
+}
+
+// `a <= b` under every assignment of the parameters
+enum LevelLE : (Level, Level) -> Prop {
+  MkLE[a : Level, b : Level](h : (rho : (Name) -> Nat) -> NatLe(ev(a, rho), ev(b, rho))) : LevelLE(a, b)
+}
+
+// ---- zero, nonzero or unknown ----------------------------------------------------
+
+enum Zness : (Level) -> Type {
+  KZero[v : Level](h : (rho : (Name) -> Nat) -> ev(v, rho) === Z) : Zness(v)
+  KNz[v : Level](h : (rho : (Name) -> Nat) -> NatLe(S(Z), ev(v, rho))) : Zness(v)
+  KUnknown[v : Level] : Zness(v)
+}
+
+lemma nmax_zz[x : Nat, y : Nat](p : x === Z, q : y === Z) -> nmax(x, y) === Z {
+  match p {
+    Refl =>
+      match q {
+        Refl => Refl
+      }
+  }
+}
+
+lemma nimax_z(x : Nat, y : Nat, q : y === Z) -> nimax(x, y) === Z {
+  match q {
+    Refl => Refl
+  }
+}
+
+lemma nimax_nz(x : Nat, y : Nat, q : NatLe(S(Z), y)) -> nimax(x, y) === nmax(x, y) {
+  match q {
+    LeS(_) => Refl
+  }
+}
+
+fn zness(v : Level) -> Zness(v) {
+  match v {
+    Zero => KZero(_ => Refl)
+    Succ(u) => KNz(rho => LeS(LeZ))
+    Param(_) => KUnknown
+    Max(a, b) =>
+      match zness(a) {
+        KNz(ha) => KNz(rho => le_trans(ha(rho), le_max_l(ev(a, rho), ev(b, rho))))
+        KZero(ha) =>
+          match zness(b) {
+            KNz(hb) => KNz(rho => le_trans(hb(rho), le_max_r(ev(a, rho), ev(b, rho))))
+            KZero(hb) => KZero(rho => nmax_zz(ha(rho), hb(rho)))
+            KUnknown => KUnknown
+          }
+        KUnknown =>
+          match zness(b) {
+            KNz(hb) => KNz(rho => le_trans(hb(rho), le_max_r(ev(a, rho), ev(b, rho))))
+            _ => KUnknown
+          }
+      }
+    IMax(a, b) =>
+      match zness(b) {
+        KZero(hb) => KZero(rho => nimax_z(ev(a, rho), ev(b, rho), hb(rho)))
+        KNz(hb) =>
+          KNz(rho => {
+            let e = nimax_nz(ev(a, rho), ev(b, rho), hb(rho))
+            le_rw_r(Id::sym(e), le_trans(hb(rho), le_max_r(ev(a, rho), ev(b, rho))))
+          })
+        KUnknown => KUnknown
+      }
+  }
+}
+
+// ---- flat forms: max(c, p + k, ...) ------------------------------------------
+
+enum Ent {
+  EConst(Nat)
+  EVar(Name, Nat)
+}
+
+fn ent_ev(e : Ent, rho : (Name) -> Nat) -> Nat {
+  match e {
+    EConst(c) => c
+    EVar(p, k) => addk(rho(p), k)
+  }
+}
+
+fn fev(es : List[Ent], rho : (Name) -> Nat) -> Nat {
+  match es {
+    Nil => Z
+    Cons(e, r) => nmax(ent_ev(e, rho), fev(r, rho))
+  }
+}
+
+lemma addk_z(k : Nat) -> addk(Z, k) === k {
+  match k {
+    Z => Refl
+    S(j) => Id::cong(S, addk_z(j))
+  }
+}
+
+// max(x, max(y, z)) <= max(max(x, y), z)
+lemma max_assoc_le(x : Nat, y : Nat, z : Nat) -> NatLe(nmax(x, nmax(y, z)), nmax(nmax(x, y), z)) {
+  let xy = nmax(x, y)
+  max_le(
+    le_trans(le_max_l(x, y), le_max_l(xy, z)),
+    max_le(le_trans(le_max_r(x, y), le_max_l(xy, z)), le_max_r(xy, z)),
+  )
+}
+
+// `r` is a flat form of `l + k` joined with `acc`
+enum Flat : (Level, Nat, List[Ent]) -> Type {
+  MkFlat[l : Level, k : Nat, acc : List[Ent]](
+    r : List[Ent],
+    up_l : (rho : (Name) -> Nat) -> NatLe(addk(ev(l, rho), k), fev(r, rho)),
+    up_acc : (rho : (Name) -> Nat) -> NatLe(fev(acc, rho), fev(r, rho)),
+    low : (rho : (Name) -> Nat) -> NatLe(fev(r, rho), nmax(addk(ev(l, rho), k), fev(acc, rho))),
+  ) : Flat(l, k, acc)
+}
+
+// a flat form for `l1` is one for `l2` when they have the same value
+fn[l1 : Level, k : Nat, acc : List[Ent]] flat_rw(
+  f : Flat(l1, k, acc),
+  l2 : Level,
+  e : (rho : (Name) -> Nat) -> ev(l1, rho) === ev(l2, rho),
+) -> Flat(l2, k, acc) {
+  match f {
+    MkFlat(r, up_l, up_acc, low) =>
+      MkFlat[l2, k, acc](
+        r,
+        rho => le_rw_l(Id::cong(x => addk(x, k), e(rho)), up_l(rho)),
+        up_acc,
+        rho => le_rw_r(Id::cong(x => nmax(addk(x, k), fev(acc, rho)), e(rho)), low(rho)),
+      )
+  }
+}
+
+fn flat_const(k : Nat, acc : List[Ent]) -> Flat(Zero, k, acc) {
+  MkFlat[Zero, k, acc](
+    Cons(EConst(k), acc),
+    rho => le_trans(le_of_eq(addk_z(k)), le_max_l(k, fev(acc, rho))),
+    rho => le_max_r(k, fev(acc, rho)),
+    rho => max_mono(le_of_eq(Id::sym(addk_z(k))), le_refl(fev(acc, rho))),
+  )
+}
+
+fn flatten(l : Level, k : Nat, acc : List[Ent]) -> Flat(l, k, acc)? {
+  match l {
+    Zero => Some(flat_const(k, acc))
+    Param(p) =>
+      Some(
+        MkFlat[l, k, acc](
+          Cons(EVar(p, k), acc),
+          rho => le_max_l(addk(rho(p), k), fev(acc, rho)),
+          rho => le_max_r(addk(rho(p), k), fev(acc, rho)),
+          rho => le_refl(nmax(addk(rho(p), k), fev(acc, rho))),
+        ),
+      )
+    Succ(u) =>
+      match flatten(u, S(k), acc) {
+        Some(MkFlat(r, up_l, up_acc, low)) =>
+          Some(
+            MkFlat[l, k, acc](
+              r,
+              rho => le_rw_l(Id::sym(addk_succ(ev(u, rho), k)), up_l(rho)),
+              up_acc,
+              rho => le_rw_r(Id::cong(x => nmax(x, fev(acc, rho)), Id::sym(addk_succ(ev(u, rho), k))), low(rho)),
+            ),
+          )
+        None => None
+      }
+    Max(a, b) => flatten_max(a, b, k, acc)
+    IMax(a, b) =>
+      match zness(b) {
+        KZero(hb) => Some(flat_rw(flat_const(k, acc), l, rho => Id::sym(nimax_z(ev(a, rho), ev(b, rho), hb(rho)))))
+        KNz(hb) =>
+          match flatten_max(a, b, k, acc) {
+            Some(f) => Some(flat_rw(f, l, rho => Id::sym(nimax_nz(ev(a, rho), ev(b, rho), hb(rho)))))
+            None => None
+          }
+        KUnknown => None
+      }
+  }
+}
+
+fn flatten_max(a : Level, b : Level, k : Nat, acc : List[Ent]) -> Flat(Max(a, b), k, acc)? {
+  match flatten(b, k, acc) {
+    None => None
+    Some(MkFlat(r1, ub_l, ub_acc, lb)) =>
+      match flatten(a, k, r1) {
+        None => None
+        Some(MkFlat(r, ua_l, ua_acc, la)) =>
+          Some(
+            MkFlat[Max(a, b), k, acc](
+              r,
+              rho => {
+                let ea = addk(ev(a, rho), k)
+                let eb = addk(ev(b, rho), k)
+                le_rw_l(
+                  Id::sym(addk_max(ev(a, rho), ev(b, rho), k)),
+                  max_le(ua_l(rho), le_trans(ub_l(rho), ua_acc(rho))),
+                )
+              },
+              rho => le_trans(ub_acc(rho), ua_acc(rho)),
+              rho => {
+                let ea = addk(ev(a, rho), k)
+                let eb = addk(ev(b, rho), k)
+                let fa = fev(acc, rho)
+                // fev r <= max(ea, fev r1) <= max(ea, max(eb, fa)) <= max(max(ea, eb), fa)
+                let s1 = le_trans(la(rho), max_mono(le_refl(ea), lb(rho)))
+                let s2 = le_trans(s1, max_assoc_le(ea, eb, fa))
+                le_rw_r(Id::cong(x => nmax(x, fa), Id::sym(addk_max(ev(a, rho), ev(b, rho), k))), s2)
+              },
+            ),
+          )
+      }
+  }
+}
+
+// ---- comparing flat forms ----------------------------------------------------
+
+// a semi-decision: a proof, or nothing (the procedure is sound; completeness
+// is not proved)
+enum Check[P : Prop] {
+  Ok(P)
+  Fail
+}
+
+fn nat_le_dec(a : Nat, b : Nat) -> Dec[NatLe(a, b)] {
+  match (a, b) {
+    (Z, _) => Yes(LeZ)
+    (S(_), Z) => No(p => match p {})
+    (S(x), S(y)) =>
+      match nat_le_dec(x, y) {
+        Yes(p) => Yes(LeS(p))
+        No(np) => No(p => match p { LeS(q) => np(q) })
+      }
+  }
+}
+
+// one entry is below another under every assignment
+enum EntLe : (Ent, Ent) -> Prop {
+  MkEntLe[e : Ent, f : Ent](h : (rho : (Name) -> Nat) -> NatLe(ent_ev(e, rho), ent_ev(f, rho))) : EntLe(e, f)
+}
+
+// an entry is below a flat form under every assignment
+enum Bound : (Ent, List[Ent]) -> Prop {
+  MkBound[e : Ent, es : List[Ent]](h : (rho : (Name) -> Nat) -> NatLe(ent_ev(e, rho), fev(es, rho))) : Bound(e, es)
+}
+
+// a flat form is below another under every assignment
+enum LBound : (List[Ent], List[Ent]) -> Prop {
+  MkLBound[a : List[Ent], b : List[Ent]](h : (rho : (Name) -> Nat) -> NatLe(fev(a, rho), fev(b, rho))) : LBound(a, b)
+}
+
+fn ent_le(e : Ent, f : Ent) -> Check[EntLe(e, f)] {
+  match (e, f) {
+    (EConst(c), EConst(d)) =>
+      match nat_le_dec(c, d) {
+        Yes(h) => Ok(MkEntLe(_ => h))
+        No(_) => Fail
+      }
+    (EConst(c), EVar(q, d)) =>
+      match nat_le_dec(c, d) {
+        Yes(h) => Ok(MkEntLe(rho => le_trans(h, k_le_addk(rho(q), d))))
+        No(_) => Fail
+      }
+    (EVar(p, k), EVar(q, d)) =>
+      match Name::deq(p, q) {
+        Yes(Refl) =>
+          match nat_le_dec(k, d) {
+            Yes(h) => Ok(MkEntLe(rho => addk_mono_r(rho(p), h)))
+            No(_) => Fail
+          }
+        No(_) => Fail
+      }
+    (EVar(_, _), EConst(_)) => Fail
+  }
+}
+
+lemma bound_here[e : Ent, f : Ent, rest : List[Ent]](p : EntLe(e, f)) -> Bound(e, Cons(f, rest)) {
+  match p {
+    MkEntLe(h) => MkBound(rho => le_trans(h(rho), le_max_l(ent_ev(f, rho), fev(rest, rho))))
+  }
+}
+
+lemma bound_there[e : Ent, f : Ent, rest : List[Ent]](p : Bound(e, rest)) -> Bound(e, Cons(f, rest)) {
+  match p {
+    MkBound(h) => MkBound(rho => le_trans(h(rho), le_max_r(ent_ev(f, rho), fev(rest, rho))))
+  }
+}
+
+fn dominated(e : Ent, es : List[Ent]) -> Check[Bound(e, es)] {
+  match es {
+    Nil => Fail
+    Cons(f, rest) =>
+      match ent_le(e, f) {
+        Ok(p) => Ok(bound_here(p))
+        Fail =>
+          match dominated(e, rest) {
+            Ok(p) => Ok(bound_there(p))
+            Fail => Fail
+          }
+      }
+  }
+}
+
+lemma lbound_nil(b : List[Ent]) -> LBound(Nil, b) {
+  MkLBound(rho => LeZ)
+}
+
+lemma lbound_cons[e : Ent, r : List[Ent], b : List[Ent]](p : Bound(e, b), q : LBound(r, b)) -> LBound(Cons(e, r), b) {
+  match p {
+    MkBound(hp) =>
+      match q {
+        MkLBound(hq) => MkLBound(rho => max_le(hp(rho), hq(rho)))
+      }
+  }
+}
+
+fn all_bounded(a : List[Ent], b : List[Ent]) -> Check[LBound(a, b)] {
+  match a {
+    Nil => Ok(lbound_nil(b))
+    Cons(e, r) =>
+      match dominated(e, b) {
+        Ok(p) =>
+          match all_bounded(r, b) {
+            Ok(q) => Ok(lbound_cons(p, q))
+            Fail => Fail
+          }
+        Fail => Fail
+      }
+  }
+}
+
+// `a <= b` from flat forms of both: ev(a) <= fev(ra) <= fev(rb) <= ev(b)
+lemma le_of_flats[a : Level, b : Level, ra : List[Ent], rb : List[Ent]](
+  ua : (rho : (Name) -> Nat) -> NatLe(ev(a, rho), fev(ra, rho)),
+  lb : (rho : (Name) -> Nat) -> NatLe(fev(rb, rho), nmax(ev(b, rho), Z)),
+  q : LBound(ra, rb),
+) -> LevelLE(a, b) {
+  match q {
+    MkLBound(h) => MkLE(rho => le_trans(ua(rho), le_trans(h(rho), le_rw_r(max_z_r(ev(b, rho)), lb(rho)))))
+  }
+}
+
+// both sides imax-free (after the case splits)
+fn flat_cmp(a : Level, b : Level) -> Check[LevelLE(a, b)] {
+  match flatten(a, Z, Nil) {
+    Some(MkFlat(ra, ua, _, _)) =>
+      match flatten(b, Z, Nil) {
+        Some(MkFlat(rb, _, _, lb)) =>
+          match all_bounded(ra, rb) {
+            Ok(q) => Ok(le_of_flats(ua, lb, q))
+            Fail => Fail
+          }
+        None => Fail
+      }
+    None => Fail
+  }
+}
+
+// ---- case splits on a parameter -------------------------------------------------
+
+fn subst(l : Level, p : Name, v : Level) -> Level {
+  match l {
+    Zero => Zero
+    Succ(u) => Succ(subst(u, p, v))
+    Max(a, b) => Max(subst(a, p, v), subst(b, p, v))
+    IMax(a, b) => IMax(subst(a, p, v), subst(b, p, v))
+    Param(n) =>
+      match Name::deq(n, p) {
+        Yes(_) => v
+        No(_) => l
+      }
+  }
+}
+
+// the assignment `rho` with `p` set to `m`
+fn upd(rho : (Name) -> Nat, p : Name, m : Nat) -> (Name) -> Nat {
+  n => match Name::deq(n, p) {
+    Yes(_) => m
+    No(_) => rho(n)
+  }
+}
+
+lemma upd_at(rho : (Name) -> Nat, p : Name, m : Nat) -> upd(rho, p, m)(p) === m {
+  match Name::deq(p, p) {
+    Yes(_) => Refl
+    No(np) => absurd(np(Refl))
+  }
+}
+
+lemma upd_other(rho : (Name) -> Nat, p : Name, m : Nat, n : Name, ne : Not(n === p)) -> upd(rho, p, m)(n) === rho(n) {
+  match Name::deq(n, p) {
+    Yes(e) => absurd(ne(e))
+    No(_) => Refl
+  }
+}
+
+lemma cong_max[a1 : Nat, a2 : Nat, b1 : Nat, b2 : Nat](p : a1 === a2, q : b1 === b2) -> nmax(a1, b1) === nmax(a2, b2) {
+  match p {
+    Refl =>
+      match q {
+        Refl => Refl
+      }
+  }
+}
+
+lemma cong_imax[a1 : Nat, a2 : Nat, b1 : Nat, b2 : Nat](p : a1 === a2, q : b1 === b2) -> nimax(a1, b1) === nimax(a2, b2) {
+  match p {
+    Refl =>
+      match q {
+        Refl => Refl
+      }
+  }
+}
+
+// when `rho(p) = 0`, substituting `0` for `p` keeps the value
+lemma subst_zero(l : Level, p : Name, rho : (Name) -> Nat, h : rho(p) === Z) -> ev(subst(l, p, Zero), rho) === ev(l, rho) {
+  match l {
+    Zero => Refl
+    Succ(u) => Id::cong(S, subst_zero(u, p, rho, h))
+    Max(a, b) => cong_max(subst_zero(a, p, rho, h), subst_zero(b, p, rho, h))
+    IMax(a, b) => cong_imax(subst_zero(a, p, rho, h), subst_zero(b, p, rho, h))
+    Param(n) =>
+      match Name::deq(n, p) {
+        Yes(e) =>
+          match e {
+            Refl => Id::sym(h)
+          }
+        No(_) => Refl
+      }
+  }
+}
+
+// when `rho(p) = m + 1`, substituting `p + 1` for `p` and setting `p` to `m`
+// keeps the value
+lemma subst_succ(l : Level, p : Name, m : Nat, rho : (Name) -> Nat, h : rho(p) === S(m)) -> ev(subst(l, p, Succ(Param(p))), upd(rho, p, m)) === ev(l, rho) {
+  match l {
+    Zero => Refl
+    Succ(u) => Id::cong(S, subst_succ(u, p, m, rho, h))
+    Max(a, b) => cong_max(subst_succ(a, p, m, rho, h), subst_succ(b, p, m, rho, h))
+    IMax(a, b) => cong_imax(subst_succ(a, p, m, rho, h), subst_succ(b, p, m, rho, h))
+    Param(n) =>
+      match Name::deq(n, p) {
+        Yes(e) =>
+          match e {
+            Refl => Id::trans(Id::cong(S, upd_at(rho, p, m)), Id::sym(h))
+          }
+        No(ne) => upd_other(rho, p, m, n, ne)
+      }
+  }
+}
+
+// `a <= b` when it holds both with `p = 0` and with `p` a successor
+lemma split_le[a : Level, b : Level](
+  p : Name,
+  h0 : LevelLE(subst(a, p, Zero), subst(b, p, Zero)),
+  h1 : LevelLE(subst(a, p, Succ(Param(p))), subst(b, p, Succ(Param(p)))),
+) -> LevelLE(a, b) {
+  match h0 {
+    MkLE(f0) =>
+      match h1 {
+        MkLE(f1) =>
+          MkLE(rho => {
+            match inspect(rho(p)) {
+              MkSing(Z, e) =>
+                le_rw_l(subst_zero(a, p, rho, e), le_rw_r(subst_zero(b, p, rho, e), f0(rho)))
+              MkSing(S(m), e) =>
+                le_rw_l(
+                  subst_succ(a, p, m, rho, e),
+                  le_rw_r(subst_succ(b, p, m, rho, e), f1(upd(rho, p, m))),
+                )
+            }
+          })
+      }
+  }
+}
+
+// ---- the decision procedure ---------------------------------------------------------
+
+// the parameters the zero-ness of an `imax`'s second argument depends on
+// (without repetitions): after splitting on them, `zness` decides every
+// `imax`. Which parameters are split on does not matter for soundness.
+fn imax_params(l : Level, under : Bool, acc : List[Name]) -> List[Name] {
+  match l {
+    Zero => acc
+    // a successor is nonzero whatever its parameters
+    Succ(u) => imax_params(u, false, acc)
+    Max(a, b) => imax_params(a, under, imax_params(b, under, acc))
+    // `imax a b` is zero exactly when `b` is
+    IMax(a, b) => imax_params(a, false, imax_params(b, true, acc))
+    Param(n) => if under && not(name_list_mem(n, acc)) { Cons(n, acc) } else { acc }
+  }
+}
+
+fn name_list_mem(n : Name, ns : List[Name]) -> Bool {
+  match ns {
+    Nil => false
+    Cons(m, rest) => m == n || name_list_mem(n, rest)
+  }
+}
+
+fn vleq_split(a : Level, b : Level, ps : List[Name]) -> Check[LevelLE(a, b)] {
+  match ps {
+    Nil => flat_cmp(a, b)
+    Cons(p, rest) => {
+      let sp = Succ(Param(p))
+      match vleq_split(subst(a, p, Zero), subst(b, p, Zero), rest) {
+        Ok(h0) =>
+          match vleq_split(subst(a, p, sp), subst(b, p, sp), rest) {
+            Ok(h1) => Ok(split_le(p, h0, h1))
+            Fail => Fail
+          }
+        Fail => Fail
+      }
+    }
+  }
+}
+
+// `a <= b` under every assignment, with a proof
+fn vleq(a : Level, b : Level) -> Check[LevelLE(a, b)] {
+  vleq_split(a, b, imax_params(a, false, imax_params(b, false, Nil)))
+}
+
+
+// the answers of `level_leq` so far
+let level_leq_cache : HashMap[(Level, Level), Bool] = HashMap::new()
+
+// `a <= b` under every assignment (the proof is erased at run time)
+fn level_leq(a : Level, b : Level) -> Bool {
+  if a.level_eq(b) {
+    return true
+  }
+  match level_leq_cache.get((a, b)) {
+    Some(r) => return r
+    None => ()
+  }
+  let r = match vleq(a, b) {
+    Ok(_) => true
+    Fail => false
+  }
+  level_leq_cache.set((a, b), r)
+  r
+}
+
+// ---- the other operations on levels used by the kernel ------------------------------
+
+enum NeverZero : (Level) -> Prop {
+  MkNZ[l : Level](h : (rho : (Name) -> Nat) -> NatLe(S(Z), ev(l, rho))) : NeverZero(l)
+}
+
+enum AlwaysZero : (Level) -> Prop {
+  MkAZ[l : Level](h : (rho : (Name) -> Nat) -> ev(l, rho) === Z) : AlwaysZero(l)
+}
+
+// two levels with the same value under every assignment
+enum SameVal : (Level, Level) -> Prop {
+  MkSV[a : Level, b : Level](h : (rho : (Name) -> Nat) -> ev(a, rho) === ev(b, rho)) : SameVal(a, b)
+}
+
+lemma nz_max_l[a : Level, b : Level](p : NeverZero(a)) -> NeverZero(Max(a, b)) {
+  match p {
+    MkNZ(h) => MkNZ(rho => le_trans(h(rho), le_max_l(ev(a, rho), ev(b, rho))))
+  }
+}
+
+lemma nz_max_r[a : Level, b : Level](p : NeverZero(b)) -> NeverZero(Max(a, b)) {
+  match p {
+    MkNZ(h) => MkNZ(rho => le_trans(h(rho), le_max_r(ev(a, rho), ev(b, rho))))
+  }
+}
+
+lemma nz_imax[a : Level, b : Level](p : NeverZero(b)) -> NeverZero(IMax(a, b)) {
+  match p {
+    MkNZ(h) =>
+      MkNZ(rho => {
+        let e = nimax_nz(ev(a, rho), ev(b, rho), h(rho))
+        le_rw_r(Id::sym(e), le_trans(h(rho), le_max_r(ev(a, rho), ev(b, rho))))
+      })
+  }
+}
+
+// Lean's syntactic test: positive under every assignment
+fn never_zero(l : Level) -> Check[NeverZero(l)] {
+  match l {
+    Zero => Fail
+    Succ(u) => Ok(MkNZ(rho => LeS(LeZ)))
+    Max(a, b) =>
+      match never_zero(a) {
+        Ok(p) => Ok(nz_max_l(p))
+        Fail =>
+          match never_zero(b) {
+            Ok(p) => Ok(nz_max_r(p))
+            Fail => Fail
+          }
+      }
+    IMax(_, b) =>
+      match never_zero(b) {
+        Ok(p) => Ok(nz_imax(p))
+        Fail => Fail
+      }
+    Param(_) => Fail
+  }
+}
+
+lemma az_max[a : Level, b : Level](p : AlwaysZero(a), q : AlwaysZero(b)) -> AlwaysZero(Max(a, b)) {
+  match p {
+    MkAZ(ha) =>
+      match q {
+        MkAZ(hb) => MkAZ(rho => nmax_zz(ha(rho), hb(rho)))
+      }
+  }
+}
+
+lemma az_imax[a : Level, b : Level](q : AlwaysZero(b)) -> AlwaysZero(IMax(a, b)) {
+  match q {
+    MkAZ(hb) => MkAZ(rho => nimax_z(ev(a, rho), ev(b, rho), hb(rho)))
+  }
+}
+
+// Lean's syntactic test: zero under every assignment
+fn always_zero(l : Level) -> Check[AlwaysZero(l)] {
+  match l {
+    Zero => Ok(MkAZ(rho => Refl))
+    Succ(_) => Fail
+    Max(a, b) =>
+      match always_zero(a) {
+        Ok(p) =>
+          match always_zero(b) {
+            Ok(q) => Ok(az_max(p, q))
+            Fail => Fail
+          }
+        Fail => Fail
+      }
+    IMax(_, b) =>
+      match always_zero(b) {
+        Ok(q) => Ok(az_imax(q))
+        Fail => Fail
+      }
+    Param(_) => Fail
+  }
+}
+
+fn Level::is_never_zero(self : Level) -> Bool {
+  match never_zero(self) {
+    Ok(_) => true
+    Fail => false
+  }
+}
+
+fn Level::is_always_zero(self : Level) -> Bool {
+  match always_zero(self) {
+    Ok(_) => true
+    Fail => false
+  }
+}
+
+// ---- simplifying `max` and `imax` ---------------------------------------------------
+
+fn Level::deq(a : Level, b : Level) -> Dec[a === b] {
+  match (a, b) {
+    (Zero, Zero) => Yes(Refl)
+    (Succ(x), Succ(y)) =>
+      match Level::deq(x, y) {
+        Yes(Refl) => Yes(Refl)
+        No(n) => No(e => match e { Refl => n(Refl) })
+      }
+    (Max(x1, y1), Max(x2, y2)) =>
+      match Level::deq(x1, x2) {
+        Yes(Refl) =>
+          match Level::deq(y1, y2) {
+            Yes(Refl) => Yes(Refl)
+            No(n) => No(e => match e { Refl => n(Refl) })
+          }
+        No(n) => No(e => match e { Refl => n(Refl) })
+      }
+    (IMax(x1, y1), IMax(x2, y2)) =>
+      match Level::deq(x1, x2) {
+        Yes(Refl) =>
+          match Level::deq(y1, y2) {
+            Yes(Refl) => Yes(Refl)
+            No(n) => No(e => match e { Refl => n(Refl) })
+          }
+        No(n) => No(e => match e { Refl => n(Refl) })
+      }
+    (Param(m), Param(n)) =>
+      match Name::deq(m, n) {
+        Yes(Refl) => Yes(Refl)
+        No(ne) => No(e => match e { Refl => ne(Refl) })
+      }
+    (Zero, Succ(_)) => No(e => match e {})
+    (Zero, Max(_, _)) => No(e => match e {})
+    (Zero, IMax(_, _)) => No(e => match e {})
+    (Zero, Param(_)) => No(e => match e {})
+    (Succ(_), Zero) => No(e => match e {})
+    (Succ(_), Max(_, _)) => No(e => match e {})
+    (Succ(_), IMax(_, _)) => No(e => match e {})
+    (Succ(_), Param(_)) => No(e => match e {})
+    (Max(_, _), Zero) => No(e => match e {})
+    (Max(_, _), Succ(_)) => No(e => match e {})
+    (Max(_, _), IMax(_, _)) => No(e => match e {})
+    (Max(_, _), Param(_)) => No(e => match e {})
+    (IMax(_, _), Zero) => No(e => match e {})
+    (IMax(_, _), Succ(_)) => No(e => match e {})
+    (IMax(_, _), Max(_, _)) => No(e => match e {})
+    (IMax(_, _), Param(_)) => No(e => match e {})
+    (Param(_), Zero) => No(e => match e {})
+    (Param(_), Succ(_)) => No(e => match e {})
+    (Param(_), Max(_, _)) => No(e => match e {})
+    (Param(_), IMax(_, _)) => No(e => match e {})
+  }
+}
+
+lemma max_idem(x : Nat) -> nmax(x, x) === x {
+  match x {
+    Z => Refl
+    S(y) => Id::cong(S, max_idem(y))
+  }
+}
+
+lemma imax_idem(x : Nat) -> nimax(x, x) === x {
+  match x {
+    Z => Refl
+    S(y) => Id::cong(S, max_idem(y))
+  }
+}
+
+lemma imax_z_l(y : Nat) -> nimax(Z, y) === y {
+  match y {
+    Z => Refl
+    S(_) => Refl
+  }
+}
+
+lemma imax_one_l(y : Nat) -> nimax(S(Z), y) === y {
+  match y {
+    Z => Refl
+    S(_) => Refl
+  }
+}
+
+// a simplified form of a level: same value
+enum Simp : (Level) -> Type {
+  MkSimp[t : Level](l : Level, p : SameVal(l, t)) : Simp(t)
+}
+
+lemma sv_refl(a : Level) -> SameVal(a, a) {
+  MkSV(rho => Refl)
+}
+
+lemma sv_trans[a : Level, b : Level, c : Level](p : SameVal(a, b), q : SameVal(b, c)) -> SameVal(a, c) {
+  match p {
+    MkSV(f) =>
+      match q {
+        MkSV(g) => MkSV(rho => Id::trans(f(rho), g(rho)))
+      }
+  }
+}
+
+lemma sv_max_zl[a : Level, b : Level](p : AlwaysZero(a)) -> SameVal(b, Max(a, b)) {
+  match p {
+    MkAZ(ha) => MkSV(rho => Id::sym(Id::cong(x => nmax(x, ev(b, rho)), ha(rho))))
+  }
+}
+
+lemma sv_max_zr[a : Level, b : Level](q : AlwaysZero(b)) -> SameVal(a, Max(a, b)) {
+  match q {
+    MkAZ(hb) =>
+      MkSV(rho => Id::sym(Id::trans(Id::cong(y => nmax(ev(a, rho), y), hb(rho)), max_z_r(ev(a, rho)))))
+  }
+}
+
+lemma sv_max_same(a : Level) -> SameVal(a, Max(a, a)) {
+  MkSV(rho => Id::sym(max_idem(ev(a, rho))))
+}
+
+// Lean's `mkLevelMax'`
+fn mk_max_c(a : Level, b : Level) -> Simp(Max(a, b)) {
+  match always_zero(a) {
+    Ok(p) => MkSimp(b, sv_max_zl(p))
+    Fail =>
+      match always_zero(b) {
+        Ok(q) => MkSimp(a, sv_max_zr(q))
+        Fail =>
+          match Level::deq(a, b) {
+            Yes(Refl) => MkSimp(a, sv_max_same(a))
+            No(_) => MkSimp(Max(a, b), sv_refl(Max(a, b)))
+          }
+      }
+  }
+}
+
+lemma sv_imax_nz[a : Level, b : Level](q : NeverZero(b)) -> SameVal(Max(a, b), IMax(a, b)) {
+  match q {
+    MkNZ(hb) => MkSV(rho => Id::sym(nimax_nz(ev(a, rho), ev(b, rho), hb(rho))))
+  }
+}
+
+lemma sv_imax_zr[a : Level, b : Level](q : AlwaysZero(b)) -> SameVal(b, IMax(a, b)) {
+  match q {
+    MkAZ(hb) => MkSV(rho => Id::trans(hb(rho), Id::sym(nimax_z(ev(a, rho), ev(b, rho), hb(rho)))))
+  }
+}
+
+lemma sv_imax_zl[a : Level, b : Level](p : AlwaysZero(a)) -> SameVal(b, IMax(a, b)) {
+  match p {
+    MkAZ(ha) =>
+      MkSV(rho => Id::sym(Id::trans(Id::cong(x => nimax(x, ev(b, rho)), ha(rho)), imax_z_l(ev(b, rho)))))
+  }
+}
+
+lemma sv_imax_one(b : Level) -> SameVal(b, IMax(Succ(Zero), b)) {
+  MkSV(rho => Id::sym(imax_one_l(ev(b, rho))))
+}
+
+lemma sv_imax_same(a : Level) -> SameVal(a, IMax(a, a)) {
+  MkSV(rho => Id::sym(imax_idem(ev(a, rho))))
+}
+
+// Lean's `mkLevelIMax'`
+fn mk_imax_c(a : Level, b : Level) -> Simp(IMax(a, b)) {
+  match never_zero(b) {
+    Ok(q) =>
+      match mk_max_c(a, b) {
+        MkSimp(l, p) => MkSimp(l, sv_trans(p, sv_imax_nz(q)))
+      }
+    Fail =>
+      match always_zero(b) {
+        Ok(q) => MkSimp(b, sv_imax_zr(q))
+        Fail =>
+          match always_zero(a) {
+            Ok(p) => MkSimp(b, sv_imax_zl(p))
+            Fail =>
+              match Level::deq(a, Succ(Zero)) {
+                Yes(Refl) => MkSimp(b, sv_imax_one(b))
+                No(_) =>
+                  match Level::deq(a, b) {
+                    Yes(Refl) => MkSimp(a, sv_imax_same(a))
+                    No(_) => MkSimp(IMax(a, b), sv_refl(IMax(a, b)))
+                  }
+              }
+          }
+      }
+  }
+}
+
+fn mk_max(a : Level, b : Level) -> Level {
+  match mk_max_c(a, b) {
+    MkSimp(l, _) => l
+  }
+}
+
+fn mk_imax(a : Level, b : Level) -> Level {
+  match mk_imax_c(a, b) {
+    MkSimp(l, _) => l
+  }
+}
+
+// ---- substituting level parameters --------------------------------------------------
+
+// the parameter `n` after substituting `us` for `ps` (the hashes are a fast
+// path: different hashes, different names)
+fn level_lookup(n : Name, ps : List[Name], us : List[Level], dflt : Level) -> Level {
+  match (ps, us) {
+    (Cons(p, ps2), Cons(u, us2)) =>
+      if p.hash_of() != n.hash_of() {
+        level_lookup(n, ps2, us2, dflt)
+      } else {
+        match Name::deq(p, n) {
+          Yes(_) => u
+          No(_) => level_lookup(n, ps2, us2, dflt)
+        }
+      }
+    _ => dflt
+  }
+}
+
+fn Level::instantiate(self : Level, ps : List[Name], us : List[Level]) -> Level {
+  match self {
+    Zero => Zero
+    Succ(l) => Succ(l.instantiate(ps, us))
+    Max(a, b) => Max(a.instantiate(ps, us), b.instantiate(ps, us))
+    IMax(a, b) => IMax(a.instantiate(ps, us), b.instantiate(ps, us))
+    Param(n) => level_lookup(n, ps, us, self)
+  }
+}
+
+// the assignment after the substitution: `n` gets the value of what
+// replaces it
+fn inst_env(ps : List[Name], us : List[Level], rho : (Name) -> Nat) -> (Name) -> Nat {
+  n => ev(level_lookup(n, ps, us, Param(n)), rho)
+}
+
+// substituting levels for parameters is evaluating under the substituted
+// assignment
+lemma inst_ev(l : Level, ps : List[Name], us : List[Level], rho : (Name) -> Nat) -> ev(l.instantiate(ps, us), rho) === ev(l, inst_env(ps, us, rho)) {
+  match l {
+    Zero => Refl
+    Succ(u) => Id::cong(S, inst_ev(u, ps, us, rho))
+    Max(a, b) => cong_max(inst_ev(a, ps, us, rho), inst_ev(b, ps, us, rho))
+    IMax(a, b) => cong_imax(inst_ev(a, ps, us, rho), inst_ev(b, ps, us, rho))
+    Param(n) => Refl
+  }
+}
+
+// so substitution preserves `<=`: the universe constraints of a constant
+// hold at every instance
+lemma inst_le[a : Level, b : Level](h : LevelLE(a, b), ps : List[Name], us : List[Level]) -> LevelLE(a.instantiate(ps, us), b.instantiate(ps, us)) {
+  match h {
+    MkLE(f) =>
+      MkLE(rho => le_rw_l(Id::sym(inst_ev(a, ps, us, rho)), le_rw_r(Id::sym(inst_ev(b, ps, us, rho)), f(inst_env(ps, us, rho)))))
+  }
+}

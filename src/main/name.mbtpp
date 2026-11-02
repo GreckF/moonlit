@@ -64,3 +64,40 @@ fn Name::is_anon(self : Name) -> Bool {
     _ => false
   }
 }
+
+// Decidable equality with proofs (`==` above compares the hashes first and
+// gives no proof).
+fn Name::deq(a : Name, b : Name) -> Dec[a === b] {
+  match (a, b) {
+    (Anon, Anon) => Yes(Refl)
+    (NStr(p, s, h), NStr(q, t, g)) =>
+      match Name::deq(p, q) {
+        Yes(Refl) =>
+          match String::deq(s, t) {
+            Yes(Refl) =>
+              match Int::deq(h, g) {
+                Yes(Refl) => Yes(Refl)
+                No(n) => No(e => match e { Refl => n(Refl) })
+              }
+            No(n) => No(e => match e { Refl => n(Refl) })
+          }
+        No(n) => No(e => match e { Refl => n(Refl) })
+      }
+    (NNum(p, s, h), NNum(q, t, g)) =>
+      match Name::deq(p, q) {
+        Yes(Refl) =>
+          match String::deq(s, t) {
+            Yes(Refl) =>
+              match Int::deq(h, g) {
+                Yes(Refl) => Yes(Refl)
+                No(n) => No(e => match e { Refl => n(Refl) })
+              }
+            No(n) => No(e => match e { Refl => n(Refl) })
+          }
+        No(n) => No(e => match e { Refl => n(Refl) })
+      }
+    (Anon, NStr(_, _, _)) | (Anon, NNum(_, _, _)) => No(e => match e {})
+    (NStr(_, _, _), Anon) | (NStr(_, _, _), NNum(_, _, _)) => No(e => match e {})
+    (NNum(_, _, _), Anon) | (NNum(_, _, _), NStr(_, _, _)) => No(e => match e {})
+  }
+}

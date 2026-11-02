@@ -13,6 +13,7 @@ enum Sing[A](x : A) {
   MkSing(y : A, eq : x === y)
 }
 
+#opaque
 fn[A] inspect(x : A) -> Sing[A](x) {
   MkSing(x, Refl)
 }
