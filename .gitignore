@@ -9,3 +9,6 @@ bin/moonlit.mjs
 tests/arena/
 SUGGESTIONS.md
 bugs/
+
+# project-local SSH key (never commit)
+.ssh/
