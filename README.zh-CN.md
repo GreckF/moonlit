@@ -15,6 +15,12 @@ moonlit 采用 **correct by construction（构造即正确）** 的写法：内�
 [形式化的方法](#形式化的方法)）。这种保证不会比 MoonBit++ 的逻辑更强，而它的逻辑是不一致的，见
 [关于证明](#关于证明)。
 
+<p align="center"><img src="docs/cbc.svg" alt="非 CBC：check : Ctx → Expr → Type → Bool，infer : Ctx → Expr → Option Type。CBC：check : (Γ : Ctx) (t : Expr) (T : Type) → Option (Γ ⊢ t : T)，infer : (Γ : Ctx) (t : Expr) → Option ((T : Type) × (Γ ⊢ t : T))" width="760"></p>
+
+不带证书的检查器用 `Bool` 或一个单纯的类型作答；构造即正确的检查器用 `Γ ⊢ t : T` 的推导作答，或者
+用类型和推导组成的对作答。在 moonlit 中，`Γ ⊢ t : T` 就是 `HasType(k, t, T)`（或 `InfType`），
+`Option` 是效应 `raise KernelError`，这个对就是 `TypeOf(k, t)`。
+
 ## 现状
 
 - **内核能用。** 已实现类型推断、弱头规约、定义等价、归纳类型（互递归与嵌套，生成的递归子与导出

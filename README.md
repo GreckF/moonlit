@@ -22,6 +22,13 @@ written down as inductive families (see
 strong as MoonBit++'s logic, which is inconsistent: see
 [About the proofs](#about-the-proofs).
 
+<p align="center"><img src="docs/cbc.svg" alt="Non-CBC: check : Ctx → Expr → Type → Bool, infer : Ctx → Expr → Option Type. CBC: check : (Γ : Ctx) (t : Expr) (T : Type) → Option (Γ ⊢ t : T), infer : (Γ : Ctx) (t : Expr) → Option ((T : Type) × (Γ ⊢ t : T))" width="760"></p>
+
+An uncertified checker answers with a `Bool` or a bare type; a correct by
+construction one answers with a derivation of `Γ ⊢ t : T`, or a type paired
+with one. In moonlit, `Γ ⊢ t : T` is `HasType(k, t, T)` (or `InfType`),
+`Option` is the effect `raise KernelError`, and the pair is `TypeOf(k, t)`.
+
 ## Status
 
 - **The kernel works.** Type inference, weak head normalization,

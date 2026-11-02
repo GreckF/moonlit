@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="250" viewBox="0 0 760 250" role="img" aria-label="Non-CBC: check : Ctx → Expr → Type → Bool; infer : Ctx → Expr → Option Type. CBC: check : (Γ : Ctx) (t : Expr) (T : Type) → Option (Γ ⊢ t : T); infer : (Γ : Ctx) (t : Expr) → Option ((T : Type) × (Γ ⊢ t : T))">
+  <style>
+    .bg { fill: #f6f8fa; stroke: #d0d7de; }
+    .rule { stroke: #d0d7de; }
+    .code { font-family: "JetBrains Mono", "Cascadia Code", Consolas, "DejaVu Sans Mono", Menlo, monospace; font-size: 17px; fill: #1f2328; }
+    .label { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; font-size: 13px; font-weight: 600; letter-spacing: 0.08em; }
+    .lbad { fill: #8c959f; }
+    .lgood { fill: #1a7f37; }
+    .fn { fill: #0550ae; font-weight: 700; }
+    .ty { fill: #0a7c6b; }
+    .var { fill: #bc4c00; font-style: italic; }
+    .jd { fill: #8250df; font-weight: 700; }
+    .op { fill: #6e7781; }
+    .weak { fill: #cf222e; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #161b22; stroke: #30363d; }
+      .rule { stroke: #30363d; }
+      .code { fill: #e6edf3; }
+      .lbad { fill: #8b949e; }
+      .lgood { fill: #3fb950; }
+      .fn { fill: #79c0ff; }
+      .ty { fill: #56d4bc; }
+      .var { fill: #ffa657; }
+      .jd { fill: #d2a8ff; }
+      .op { fill: #8b949e; }
+      .weak { fill: #ff7b72; }
+    }
+  </style>
+  <rect class="bg" x="0.5" y="0.5" width="759" height="249" rx="10"/>
+
+  <text class="label lbad" x="28" y="36">NON-CBC</text>
+  <text class="code" x="28" y="66" xml:space="preserve"><tspan class="fn">check</tspan> <tspan class="op">:</tspan> <tspan class="ty">Ctx</tspan> <tspan class="op">→</tspan> <tspan class="ty">Expr</tspan> <tspan class="op">→</tspan> <tspan class="ty">Type</tspan> <tspan class="op">→</tspan> <tspan class="weak">Bool</tspan></text>
+  <text class="code" x="28" y="94" xml:space="preserve"><tspan class="fn">infer</tspan> <tspan class="op">:</tspan> <tspan class="ty">Ctx</tspan> <tspan class="op">→</tspan> <tspan class="ty">Expr</tspan> <tspan class="op">→</tspan> <tspan class="ty">Option</tspan> <tspan class="op">(</tspan><tspan class="weak">Type</tspan><tspan class="op">)</tspan></text>
+
+  <line class="rule" x1="28" y1="122" x2="732" y2="122" stroke-dasharray="4 4"/>
+
+  <text class="label lgood" x="28" y="154">CBC</text>
+  <text class="code" x="28" y="184" xml:space="preserve"><tspan class="fn">check</tspan> <tspan class="op">:</tspan> <tspan class="op">(</tspan><tspan class="var">Γ</tspan> <tspan class="op">:</tspan> <tspan class="ty">Ctx</tspan><tspan class="op">)</tspan> <tspan class="op">(</tspan><tspan class="var">t</tspan> <tspan class="op">:</tspan> <tspan class="ty">Expr</tspan><tspan class="op">)</tspan> <tspan class="op">(</tspan><tspan class="var">T</tspan> <tspan class="op">:</tspan> <tspan class="ty">Type</tspan><tspan class="op">)</tspan> <tspan class="op">→</tspan> <tspan class="ty">Option</tspan> <tspan class="op">(</tspan><tspan class="var">Γ</tspan> <tspan class="jd">⊢</tspan> <tspan class="var">t</tspan> <tspan class="jd">:</tspan> <tspan class="var">T</tspan><tspan class="op">)</tspan></text>
+  <text class="code" x="28" y="212" xml:space="preserve"><tspan class="fn">infer</tspan> <tspan class="op">:</tspan> <tspan class="op">(</tspan><tspan class="var">Γ</tspan> <tspan class="op">:</tspan> <tspan class="ty">Ctx</tspan><tspan class="op">)</tspan> <tspan class="op">(</tspan><tspan class="var">t</tspan> <tspan class="op">:</tspan> <tspan class="ty">Expr</tspan><tspan class="op">)</tspan> <tspan class="op">→</tspan> <tspan class="ty">Option</tspan> <tspan class="op">((</tspan><tspan class="var">T</tspan> <tspan class="op">:</tspan> <tspan class="ty">Type</tspan><tspan class="op">)</tspan> <tspan class="jd">×</tspan> <tspan class="op">(</tspan><tspan class="var">Γ</tspan> <tspan class="jd">⊢</tspan> <tspan class="var">t</tspan> <tspan class="jd">:</tspan> <tspan class="var">T</tspan><tspan class="op">))</tspan></text>
+</svg>
