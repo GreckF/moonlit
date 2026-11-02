@@ -3,7 +3,7 @@
 
 struct Tc {
   mut infer_i : HashMap[Int, Expr]
-  mut infer_c : HashMap[Int, Expr]
+  mut infer_c : HashMap[Int, AnyHas]
   mut whnf_core_c : HashMap[Int, AnyRed]
   mut whnf_c : HashMap[Int, AnyRed]
   mut failure : HashMap[(Int, Int), Bool]
@@ -50,8 +50,6 @@ fn tc_log(k : K, c : Int, x : Int, y : Int) -> Unit {
 fn cache_of(k : K, c : Int) -> HashMap[Int, Expr] {
   if c == C_INFER_I {
     k.tc.infer_i
-  } else if c == C_INFER_C {
-    k.tc.infer_c
   } else {
     k.tc.unfold_c
   }
@@ -71,6 +69,17 @@ fn tc_purge(k : K, mark : Int, lmark : Int) -> Unit {
         false
       } else {
         true
+      }
+    } else if c == C_INFER_C {
+      match t.infer_c.get(x) {
+        Some(a) =>
+          if x >= mark || a.ty() >= mark {
+            t.infer_c.remove(x)
+            false
+          } else {
+            true
+          }
+        None => false
       }
     } else if c == C_UF {
       match t.uf.get(x) {
@@ -285,15 +294,14 @@ fn infer_type(k : K, e : Expr) -> Expr raise KernelError {
   infer_type_core(k, e, true)
 }
 
-fn check_type(k : K, e : Expr) -> Expr raise KernelError {
-  infer_type_core(k, e, false)
-}
-
 fn infer_type_core(k : K, e : Expr, infer_only : Bool) -> Expr raise KernelError {
+  if not(infer_only) {
+    return check_type(k, e)
+  }
   if has_loose_bvars(k, e) {
     kfail("type checker does not support loose bound variables")
   }
-  let cache = if infer_only { k.tc.infer_i } else { k.tc.infer_c }
+  let cache = k.tc.infer_i
   bump(k, ST_INFER)
   match cache.get(e) {
     Some(r) => {
@@ -352,7 +360,7 @@ fn infer_type_core(k : K, e : Expr, infer_only : Bool) -> Expr raise KernelError
     VLet(_, _, _, _) => infer_let(k, e, infer_only)
   }
   cache.set(e, r)
-  tc_log(k, if infer_only { C_INFER_I } else { C_INFER_C }, e, 0)
+  tc_log(k, C_INFER_I, e, 0)
   r
 }
 

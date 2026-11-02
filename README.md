@@ -18,9 +18,11 @@ and checks every declaration. The algorithms follow
   literals are implemented. See the test report below.
 - **Part of it carries proofs, which are not a formal verification.** The
   universe level operations the kernel uses are proved correct against a
-  semantics of levels, and weak head normalization and definitional equality
-  return certificates (see [About the proofs](#about-the-proofs)). Type
-  inference and the checks of declarations have no proofs yet.
+  semantics of levels, and weak head normalization, definitional equality
+  and type checking return certificates (see
+  [About the proofs](#about-the-proofs)). The checks specific to inductive
+  types (positivity, universe constraints, recursor generation) have no
+  proofs yet.
 - Unsafe inductive types are rejected (not supported). Partial definitions
   are checked like safe ones; safe declarations may not use unsafe or partial
   ones.
@@ -75,15 +77,22 @@ rules) and [`src/main/defeq.mbtpp`](src/main/defeq.mbtpp):
   `DefEq(k, t, s)` by the rules of the algorithm (congruence, binders compared
   under a fresh variable, sorts by the proved level equivalence, η, structure
   η, proof irrelevance, unit-like types, Nat literals); the union-find cache
-  and the other caches store derivations too.
+  and the other caches store derivations too;
+- type inference in checking mode returns the type `t` of `e` with a
+  derivation of `HasType(k, e, t)` (in [`src/main/check.mbtpp`](src/main/check.mbtpp));
+  so the value of every definition, theorem and opaque constant that is
+  accepted has a derivation that it has the declared type, and the declared
+  type a derivation that it is a type.
 
 A certificate shows that the answer follows from the rules; it does not show
 that the rules are those of Lean's type theory, nor that the primitives used
 in them are correct. Trusted, as primitives: the arena operations (`view`,
 `instantiate`, `mk_*`), the environment and the local context, unfolding a
 definition, the field of a constructor application, applying the rule of a
-recursor to a constructor application. Trusted, as single rules for now:
-type inference where the rules use it (η, structure η, proof irrelevance,
+recursor to a constructor application, building the type of a binder from
+the type of its body (`mk_pi_fvars`, `cheap_beta_reduce`). Trusted, as single
+rules for now: the type of a projection, type inference in its fast mode
+(without checks) where the rules use it (η, structure η, proof irrelevance,
 unit-like types, K-like reduction), and garbage collection keeping the terms
 in use (`RCopy`).
 
@@ -138,8 +147,9 @@ rejected.
 | `src/main/name.mbtpp`, `level.mbtpp` | names; universe levels |
 | `src/main/level_proof.mbtpp` | the semantics of levels; the decision procedure for `≤` and the other level operations, with proofs |
 | `src/main/nat_proof.mbtpp` | Lean's definitions of the accelerated Nat operations, proved equal to the ones the kernel uses |
-| `src/main/judgment.mbtpp` | the judgments `Red` and `DefEq` the kernel's answers are certified with |
+| `src/main/judgment.mbtpp` | the judgments `Red`, `DefEq` and `HasType` the kernel's answers are certified with |
 | `src/main/defeq.mbtpp` | definitional equality, certified |
+| `src/main/check.mbtpp` | type inference in checking mode, certified; the typing certificates of declarations |
 | `src/main/expr.mbtpp` | expressions, hash-consed in an arena (equality and caches are O(1)); substitution; region-based collection |
 | `src/main/env.mbtpp` | declarations, environment, local context |
 | `src/main/tc.mbtpp` | type inference, whnf (certified), literals, quotient and recursor reduction |
@@ -156,35 +166,34 @@ Setup: Windows 11, Node.js 20.16, `moonpp` 0.6.3, moon 0.1.20261028,
 the JS build (`bash scripts/build.sh`), one test at a time, a **60 s time
 limit per test**.
 
-**Result: 203 of 207 tests pass.** Every test in `bad/` is rejected and no
-test in `good/` is rejected. The 4 failures are tests in `good/perf` that do
+**Result: 204 of 207 tests pass.** Every test in `bad/` is rejected and no
+test in `good/` is rejected. The 3 failures are tests in `good/perf` that do
 not finish within 60 s.
 
 | Category | Passed | Total | Time (s) |
 | --- | --- | --- | --- |
-| `bad/bugs` | 26 | 26 | 8.5 |
+| `bad/bugs` | 26 | 26 | 7.5 |
 | `bad/other` | 5 | 5 | 1.2 |
-| `bad/perf` | 2 | 2 | 1.1 |
-| `bad/tutorial` | 47 | 47 | 13.5 |
-| `good/corner-cases` | 1 | 1 | 0.2 |
-| `good/init-prelude.ndjson` | 1 | 1 | 1.7 |
-| `good/other` | 5 | 5 | 1.3 |
-| `good/perf` | 22 | 26 | 323.9 |
-| `good/tutorial` | 94 | 94 | 19.8 |
-| **Total** | **203** | **207** | 371.2 |
+| `bad/perf` | 2 | 2 | 1.0 |
+| `bad/tutorial` | 47 | 47 | 10.8 |
+| `good/corner-cases` | 1 | 1 | 0.3 |
+| `good/init-prelude.ndjson` | 1 | 1 | 1.9 |
+| `good/other` | 5 | 5 | 1.8 |
+| `good/perf` | 23 | 26 | 302.2 |
+| `good/tutorial` | 94 | 94 | 19.5 |
+| **Total** | **204** | **207** | 346.2 |
 
 Failures (all timeouts at 60 s):
 
 | Test | Separate run with a longer limit |
 | --- | --- |
 | `good/perf/app-lam` | not finished within 400 s |
-| `good/perf/magma-list-deep-n21` | accepted after 282 s |
 | `good/perf/magma-list-deep-n36` | not tried beyond 60 s |
 | `good/perf/magma-list-pair-n21` | not finished within 400 s |
 
-The slowest tests that pass: `magma-list-pair-n7` 31.5 s, `grind-ring-5`
-18.5 s, `beta-ladder` 14.1 s, `let-ladder` 8.1 s; every other test takes
-under 2 s (`init-prelude`: 1.7 s).
+The slowest tests that pass: `magma-list-deep-n21` 43.8 s,
+`magma-list-pair-n7` 33.2 s, `beta-ladder` 16.1 s, `grind-ring-5` 14.7 s,
+`let-ladder` 5.3 s; every other test takes under 2 s (`init-prelude`: 1.9 s).
 
 The `magma-list` tests check a `decide` proof that enumerates a magma
 equation in 5 variables over `Fin n`; `app-lam` has not been profiled yet.

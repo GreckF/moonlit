@@ -13,7 +13,8 @@ MoonBit）写的 Lean 4 类型检查器（内核）。它读取
 - **内核能用。** 已实现类型推断、弱头规约、定义等价、归纳类型（互递归与嵌套，生成的递归子与导出
   文件中的逐一比对）、商类型以及 Nat/String 字面量。测试结果见下面的报告。
 - **一部分带有证明，但这不是形式化验证。** 内核用到的宇宙层级运算，相对于层级的语义证明了正确；
-  弱头规约和定义等价返回证书（见[关于证明](#关于证明)）。类型推断和声明的检查还没有证明。
+  弱头规约、定义等价和类型检查返回证书（见[关于证明](#关于证明)）。归纳类型特有的检查（正性、宇宙约束、
+  生成递归子）还没有证明。
 - 不支持 unsafe 归纳类型（直接拒绝）。partial 定义按 safe 定义检查；safe 声明不能使用 unsafe 或
   partial 声明。
 
@@ -52,12 +53,17 @@ MoonBit++ Prelude 的运算直接计算字面量上的 `Nat.add` 等）：这些
   字面量展开、K-like 规约或结构体 η 变成构造子应用，每一步都带推导；
 - `is_def_eq` 每次回答“相等”时，都给出按算法规则推出 `DefEq(k, t, s)` 的推导（同余、在新变量下比较
   binder、用已证明的层级等价比较 sort、η、结构体 η、证明无关、unit-like 类型、Nat 字面量）；union-find
-  和其他缓存中存的也是带推导的结果。
+  和其他缓存中存的也是带推导的结果；
+- 检查模式的类型推断返回 `e` 的类型 `t`，同时给出 `HasType(k, e, t)` 的推导（见
+  [`src/main/check.mbtpp`](src/main/check.mbtpp)）；因此每个被接受的定义、定理和 opaque 常量，其值都有
+  “具有所声明类型”的推导，所声明的类型也有“是一个类型”的推导。
 
 证书说明答案能由这些规则推出；它不说明这些规则就是 Lean 类型论的规则，也不说明规则中用到的原语是
 正确的。作为原语被信任的：arena 上的操作（`view`、`instantiate`、`mk_*`）、环境与局部上下文、展开
-定义、取构造子应用的字段、把递归子的规则用到构造子应用上。目前作为单条规则被信任的：规则中用到的
-类型推断（η、结构体 η、证明无关、unit-like 类型、K-like 规约），以及垃圾回收保留在用的项（`RCopy`）。
+定义、取构造子应用的字段、把递归子的规则用到构造子应用上、由 binder 体的类型构造 binder 的类型
+（`mk_pi_fvars`、`cheap_beta_reduce`）。目前作为单条规则被信任的：投影的类型，规则中用到的快速模式
+（不做检查）的类型推断（η、结构体 η、证明无关、unit-like 类型、K-like 规约），以及垃圾回收保留在用的项
+（`RCopy`）。
 
 证明在编译时被擦除，运行时没有开销（构造带证书的结果有一些分配开销）。原始类型的相等
 （`String::deq`、`Int::deq`）和指针相等（`ptr_deq`）依赖 MoonBit++ Prelude 中的公理。
@@ -103,8 +109,9 @@ bash scripts/arena_report.sh [每个测试的时限秒数]             # 每个�
 | `src/main/name.mbtpp`、`level.mbtpp` | 名字；宇宙层级 |
 | `src/main/level_proof.mbtpp` | 层级的语义；`≤` 的判定及其他层级运算，带证明 |
 | `src/main/nat_proof.mbtpp` | Lean 对被加速的 Nat 运算的定义，证明与内核所用的运算相等 |
-| `src/main/judgment.mbtpp` | 给内核的回答作证书的判断 `Red` 和 `DefEq` |
+| `src/main/judgment.mbtpp` | 给内核的回答作证书的判断 `Red`、`DefEq` 和 `HasType` |
 | `src/main/defeq.mbtpp` | 定义等价，带证书 |
+| `src/main/check.mbtpp` | 检查模式的类型推断，带证书；声明的类型证书 |
 | `src/main/expr.mbtpp` | 表达式：在 arena 中 hash-consing（相等与缓存都是 O(1)）；代换；按区域回收 |
 | `src/main/env.mbtpp` | 声明、环境、局部上下文 |
 | `src/main/tc.mbtpp` | 类型推断、whnf（带证书）、字面量、商类型与递归子的规约 |
@@ -120,33 +127,33 @@ bash scripts/arena_report.sh [每个测试的时限秒数]             # 每个�
 环境：Windows 11，Node.js 20.16，`moonpp` 0.6.3，moon 0.1.20261028，JS 构建
 （`bash scripts/build.sh`），逐个运行，**每个测试限时 60 秒**。
 
-**结果：207 个测试通过 203 个。** `bad/` 中的测试全部被拒绝，`good/` 中没有测试被拒绝。
-4 个失败都是 `good/perf` 中 60 秒内没有跑完的测试。
+**结果：207 个测试通过 204 个。** `bad/` 中的测试全部被拒绝，`good/` 中没有测试被拒绝。
+3 个失败都是 `good/perf` 中 60 秒内没有跑完的测试。
 
 | 类别 | 通过 | 总数 | 耗时（秒） |
 | --- | --- | --- | --- |
-| `bad/bugs` | 26 | 26 | 8.5 |
+| `bad/bugs` | 26 | 26 | 7.5 |
 | `bad/other` | 5 | 5 | 1.2 |
-| `bad/perf` | 2 | 2 | 1.1 |
-| `bad/tutorial` | 47 | 47 | 13.5 |
-| `good/corner-cases` | 1 | 1 | 0.2 |
-| `good/init-prelude.ndjson` | 1 | 1 | 1.7 |
-| `good/other` | 5 | 5 | 1.3 |
-| `good/perf` | 22 | 26 | 323.9 |
-| `good/tutorial` | 94 | 94 | 19.8 |
-| **合计** | **203** | **207** | 371.2 |
+| `bad/perf` | 2 | 2 | 1.0 |
+| `bad/tutorial` | 47 | 47 | 10.8 |
+| `good/corner-cases` | 1 | 1 | 0.3 |
+| `good/init-prelude.ndjson` | 1 | 1 | 1.9 |
+| `good/other` | 5 | 5 | 1.8 |
+| `good/perf` | 23 | 26 | 302.2 |
+| `good/tutorial` | 94 | 94 | 19.5 |
+| **合计** | **204** | **207** | 346.2 |
 
 失败的测试（都是 60 秒超时）：
 
 | 测试 | 单独以更长时限运行的结果 |
 | --- | --- |
 | `good/perf/app-lam` | 400 秒内没有跑完 |
-| `good/perf/magma-list-deep-n21` | 282 秒后接受 |
 | `good/perf/magma-list-deep-n36` | 没有测试超过 60 秒的情况 |
 | `good/perf/magma-list-pair-n21` | 400 秒内没有跑完 |
 
-通过的测试中最慢的：`magma-list-pair-n7` 31.5 秒，`grind-ring-5` 18.5 秒，`beta-ladder`
-14.1 秒，`let-ladder` 8.1 秒；其余都在 2 秒以内（`init-prelude` 1.7 秒）。
+通过的测试中最慢的：`magma-list-deep-n21` 43.8 秒，`magma-list-pair-n7` 33.2 秒，
+`beta-ladder` 16.1 秒，`grind-ring-5` 14.7 秒，`let-ladder` 5.3 秒；其余都在 2 秒以内
+（`init-prelude` 1.9 秒）。
 
 `magma-list` 系列检查的是一个 `decide` 证明：在 `Fin n` 上穷举一个 5 变量的 magma 等式；
 `app-lam` 还没有剖析。让这几个测试变快是接下来的工作。

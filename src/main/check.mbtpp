@@ -1,0 +1,274 @@
+// Type inference in checking mode (lean4lean's `inferType` with
+// `inferOnly := false`), certified: the inferred type comes with a `HasType`
+// derivation (see `judgment.mbtpp`). Binders are checked one at a time.
+
+fn check_type(k : K, e : Expr) -> Expr raise KernelError {
+  check_c(k, e).ty()
+}
+
+fn ensure_sort_c(k : K, t : Expr, s : Expr) -> SortOf(k, t) raise KernelError {
+  match inspect(view(k, t)) {
+    MkSing(VSort(u), ev) => MkSortOf(t, u, RRefl, ev)
+    MkSing(_, _) =>
+      match whnf_c(k, t) {
+        MkRedTo(t2, p) =>
+          match inspect(view(k, t2)) {
+            MkSing(VSort(u), ev) => MkSortOf(t2, u, p, ev)
+            MkSing(_, _) => kfail("type expected: " + show_expr(k, s))
+          }
+      }
+  }
+}
+
+fn ensure_pi_c(k : K, t : Expr, s : Expr) -> PiOf(k, t) raise KernelError {
+  match inspect(view(k, t)) {
+    MkSing(VPi(n, d, b, bi), ev) => MkPiOf(t, n, d, b, bi, RRefl, ev)
+    MkSing(_, _) =>
+      match whnf_c(k, t) {
+        MkRedTo(t2, p) =>
+          match inspect(view(k, t2)) {
+            MkSing(VPi(n, d, b, bi), ev) => MkPiOf(t2, n, d, b, bi, p, ev)
+            MkSing(_, _) => kfail("function expected: " + show_expr(k, s))
+          }
+      }
+  }
+}
+
+fn check_c(k : K, e : Expr) -> TypeOf(k, e) raise KernelError {
+  if has_loose_bvars(k, e) {
+    kfail("type checker does not support loose bound variables")
+  }
+  bump(k, ST_INFER)
+  match k.tc.infer_c.get(e) {
+    Some(a) =>
+      match any_has_get(k, e, a) {
+        Some(r) => {
+          bump(k, ST_INFER_HIT)
+          return r
+        }
+        None => ()
+      }
+    None => ()
+  }
+  let r : TypeOf(k, e) = match inspect(view(k, e)) {
+    MkSing(VNatLit(_), ev) => {
+      ignore(env_get(k, k.names.nat))
+      MkTypeOf(mk_const(k, k.names.nat, Nil), TNat(ev))
+    }
+    MkSing(VStrLit(_), ev) => {
+      ignore(env_get(k, k.names.char_of_nat))
+      ignore(env_get(k, k.names.string_of_list))
+      MkTypeOf(mk_const(k, k.names.string, Nil), TStr(ev))
+    }
+    MkSing(VProj(n, idx, x), ev) =>
+      match check_c(k, x) {
+        MkTypeOf(st, px) =>
+          match inspect(proj_type(k, e, n, idx, x, st)) {
+            MkSing(Ok(t), et) => MkTypeOf(t, TProj(ev, px, et))
+            MkSing(Err(err), _) => raise err
+          }
+      }
+    MkSing(VFVar(id), ev) => MkTypeOf(local_type(k, id), TFVar(ev))
+    MkSing(VBVar(_), _) => kfail("unexpected bound variable")
+    MkSing(VSort(l), ev) =>
+      match inspect(l.undef_param(k.tc.lparams)) {
+        MkSing(None, eu) => MkTypeOf(mk_sort(k, Succ(l)), TSort(ev, eu))
+        MkSing(Some(n), _) => kfail("undefined universe level parameter '\{n}'")
+      }
+    MkSing(VConst(n, ls), ev) => check_const_c(k, e, n, ls, ev)
+    MkSing(VLam(n, d, b, bi), ev) => check_lam_c(k, e, n, d, b, bi, ev)
+    MkSing(VPi(n, d, b, bi), ev) => check_pi_c(k, e, n, d, b, bi, ev)
+    MkSing(VApp(f, a), ev) => check_app_c(k, e, f, a, ev)
+    MkSing(VLet(n, t, v, b), ev) => check_let_c(k, e, n, t, v, b, ev)
+  }
+  match r {
+    MkTypeOf(t, p) => {
+      k.tc.infer_c.set(e, MkAnyHas(k, e, t, p))
+      tc_log(k, C_INFER_C, e, 0)
+    }
+  }
+  r
+}
+
+fn check_const_c(k : K, e : Expr, n : Name, ls : List[Level], ev : view(k, e) === VConst(n, ls)) -> TypeOf(k, e) raise KernelError {
+  match inspect(env_find(k, n)) {
+    MkSing(Some(info), eci) => {
+      if info.is_unsafe(k) {
+        match k.tc.safety {
+          UnsafeDecl => ()
+          _ => kfail("invalid declaration, it uses unsafe declaration '\{n}'")
+        }
+      }
+      if info.is_partial(k) {
+        match k.tc.safety {
+          SafeDecl => kfail("invalid declaration, safe declaration must not contain partial declaration '\{n}'")
+          _ => ()
+        }
+      }
+      match Int::deq(info.num_lparams(k), list_length(ls)) {
+        Yes(en) =>
+          match inspect(levels_undef(ls, k.tc.lparams)) {
+            MkSing(None, eu) => MkTypeOf(instantiate_lparams(k, info.type, info.lparams, ls), TConst(ev, eci, en, eu))
+            MkSing(Some(p), _) => kfail("undefined universe level parameter '\{p}'")
+          }
+        No(_) => kfail("incorrect number of universe levels for '\{n}'")
+      }
+    }
+    MkSing(None, _) => kfail("unknown constant '\{n}'")
+  }
+}
+
+// a new local variable of type `d` (and value `v`, for a let) and the facts the
+// binder rules need about it
+enum Fresh : (K, Expr, Option[Expr]) -> Type {
+  MkFresh[k : K, d : Expr, v : Option[Expr]](
+    x : Expr,
+    id : Int,
+    ex : view(k, x) === VFVar(id),
+    et : local_type(k, id) === d,
+    ev : local_value(k, id) === v,
+  ) : Fresh(k, d, v)
+}
+
+fn fresh_local(k : K, n : Name, d : Expr) -> Fresh(k, d, None) raise KernelError {
+  let x = mk_local_decl(k, n, d)
+  match inspect(view(k, x)) {
+    MkSing(VFVar(id), ex) =>
+      match (Int::deq(local_type(k, id), d), inspect(local_value(k, id))) {
+        (Yes(et), MkSing(None, ev)) => MkFresh(x, id, ex, et, ev)
+        _ => kfail("internal: new local variable")
+      }
+    MkSing(_, _) => kfail("internal: new local variable")
+  }
+}
+
+fn fresh_let(k : K, n : Name, t : Expr, v : Expr) -> Fresh(k, t, Some(v)) raise KernelError {
+  let x = mk_let_decl(k, n, t, v)
+  match inspect(view(k, x)) {
+    MkSing(VFVar(id), ex) =>
+      match (Int::deq(local_type(k, id), t), inspect(local_value(k, id))) {
+        (Yes(et), MkSing(Some(v2), ev)) =>
+          match Int::deq(v2, v) {
+            Yes(Refl) => MkFresh(x, id, ex, et, ev)
+            No(_) => kfail("internal: new let variable")
+          }
+        _ => kfail("internal: new let variable")
+      }
+    MkSing(_, _) => kfail("internal: new let variable")
+  }
+}
+
+fn check_lam_c(k : K, e : Expr, n : Name, d : Expr, b : Expr, bi : BinderInfo, ev : view(k, e) === VLam(n, d, b, bi)) -> TypeOf(k, e) raise KernelError {
+  match check_c(k, d) {
+    MkTypeOf(sd, pd) =>
+      match ensure_sort_c(k, sd, d) {
+        MkSortOf(_, _, rs, es) =>
+          match fresh_local(k, n, d) {
+            MkFresh(x, _, ex, et, elv) =>
+              match check_c(k, instantiate1(k, b, x)) {
+                MkTypeOf(bt, pb) => MkTypeOf(mk_pi_fvars(k, [x], cheap_beta_reduce(k, bt)), TLam(ev, pd, rs, es, ex, et, elv, pb))
+              }
+          }
+      }
+  }
+}
+
+fn check_pi_c(k : K, e : Expr, n : Name, d : Expr, b : Expr, bi : BinderInfo, ev : view(k, e) === VPi(n, d, b, bi)) -> TypeOf(k, e) raise KernelError {
+  match check_c(k, d) {
+    MkTypeOf(sd, pd) =>
+      match ensure_sort_c(k, sd, d) {
+        MkSortOf(_, u, rs, es) =>
+          match fresh_local(k, n, d) {
+            MkFresh(x, _, ex, et, elv) => {
+              let body = instantiate1(k, b, x)
+              match check_c(k, body) {
+                MkTypeOf(sb, pb) =>
+                  match ensure_sort_c(k, sb, body) {
+                    MkSortOf(_, v, rb, eb) => MkTypeOf(mk_sort(k, mk_imax(u, v)), TPi(ev, pd, rs, es, ex, et, elv, pb, rb, eb))
+                  }
+              }
+            }
+          }
+      }
+  }
+}
+
+fn check_app_c(k : K, e : Expr, f : Expr, a : Expr, ev : view(k, e) === VApp(f, a)) -> TypeOf(k, e) raise KernelError {
+  match check_c(k, f) {
+    MkTypeOf(ft, pf) =>
+      match ensure_pi_c(k, ft, e) {
+        MkPiOf(_, _, dom, body, _, rp, ep) =>
+          match check_c(k, a) {
+            MkTypeOf(at, pa) => {
+              let dq = if get_app_num_args(k, a) == 2 && is_const_of(k, get_app_fn(k, a), k.names.eager_reduce) {
+                let saved = k.tc.eager
+                k.tc.eager = true
+                let r = is_def_eq_c(k, dom, at)
+                k.tc.eager = saved
+                r
+              } else {
+                is_def_eq_c(k, dom, at)
+              }
+              match dq {
+                Holds(q) => MkTypeOf(instantiate1(k, body, a), TApp(ev, pf, rp, ep, pa, q))
+                Fail => kfail("application type mismatch: " + show_expr(k, e))
+              }
+            }
+          }
+      }
+  }
+}
+
+fn check_let_c(k : K, e : Expr, n : Name, t : Expr, v : Expr, b : Expr, ev : view(k, e) === VLet(n, t, v, b)) -> TypeOf(k, e) raise KernelError {
+  match check_c(k, t) {
+    MkTypeOf(st, pt) =>
+      match ensure_sort_c(k, st, t) {
+        MkSortOf(_, _, rs, es) =>
+          match check_c(k, v) {
+            MkTypeOf(vt, pv) =>
+              match is_def_eq_c(k, vt, t) {
+                Holds(q) =>
+                  match fresh_let(k, n, t, v) {
+                    MkFresh(x, _, ex, et, elv) =>
+                      match check_c(k, instantiate1(k, b, x)) {
+                        MkTypeOf(bt, pb) => MkTypeOf(mk_pi_fvars(k, [x], cheap_beta_reduce(k, bt)), TLet(ev, pt, rs, es, pv, q, ex, et, elv, pb))
+                      }
+                  }
+                Fail => kfail("let type mismatch: " + n.to_string())
+              }
+          }
+      }
+  }
+}
+
+// ---- declarations ---------------------------------------------------------------------
+
+// `e` has type `t`
+enum Typed : (K, Expr, Expr) -> Type {
+  MkTyped[k : K, e : Expr, t : Expr](p : HasType(k, e, t)) : Typed(k, e, t)
+}
+
+// `t` is a type: its type reduces to a sort
+enum IsType : (K, Expr) -> Type {
+  MkIsType[k : K, t : Expr](s : Expr, sn : Expr, u : Level, p : HasType(k, t, s), r : Red(k, s, sn), e : view(k, sn) === VSort(u)) : IsType(k, t)
+}
+
+fn check_is_type_c(k : K, t : Expr) -> IsType(k, t) raise KernelError {
+  match check_c(k, t) {
+    MkTypeOf(s, p) =>
+      match ensure_sort_c(k, s, t) {
+        MkSortOf(sn, u, r, e) => MkIsType(s, sn, u, p, r, e)
+      }
+  }
+}
+
+// the value of a declaration has its declared type
+fn check_value_c(k : K, name : Name, type_ : Expr, value : Expr) -> Typed(k, value, type_) raise KernelError {
+  match check_c(k, value) {
+    MkTypeOf(vt, pv) =>
+      match is_def_eq_c(k, vt, type_) {
+        Holds(q) => MkTyped(TConv(pv, q))
+        Fail => kfail("declaration type mismatch: '\{name}'")
+      }
+  }
+}

@@ -17,6 +17,7 @@ options(
     "tc.mbtpp",
     "judgment.mbtpp",
     "defeq.mbtpp",
+    "check.mbtpp",
     "inductive.mbtpp",
     "decl.mbtpp",
     "loader.mbtpp",

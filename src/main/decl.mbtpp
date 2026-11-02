@@ -7,18 +7,14 @@ fn check_constant_val(k : K, name : Name, lparams : List[Name], type_ : Expr) ->
   if has_fvar(k, type_) {
     kfail("declaration '\{name}' has free variables")
   }
-  let s = check_type(k, type_)
-  ignore(ensure_sort_core(k, s, type_))
+  ignore(check_is_type_c(k, type_))
 }
 
 fn check_value(k : K, name : Name, type_ : Expr, value : Expr) -> Unit raise KernelError {
   if has_fvar(k, value) {
     kfail("declaration '\{name}' has free variables")
   }
-  let vt = check_type(k, value)
-  if not(is_def_eq(k, vt, type_)) {
-    kfail("declaration type mismatch: '\{name}'")
-  }
+  ignore(check_value_c(k, name, type_, value))
 }
 
 fn add_axiom(k : K, name : Name, lparams : List[Name], type_ : Expr, is_unsafe : Bool) -> Unit raise KernelError {

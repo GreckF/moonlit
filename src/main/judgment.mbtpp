@@ -372,3 +372,141 @@ fn any_eq_get(k : K, e : Expr, a : AnyEq) -> EqTo(k, e)? {
       }
   }
 }
+
+// ---- typing -----------------------------------------------------------------------------
+
+// trusted: the type of a projection, from the type of the structure (Lean's
+// `inferProj`: the field types of the constructor, instantiated with the
+// parameters and the earlier projections)
+fn proj_type(k : K, e : Expr, n : Name, i : Int, x : Expr, st : Expr) -> Result[Expr, KernelError] {
+  try {
+    Ok(infer_proj(k, e, n, i, x, st))
+  } catch {
+    KernelError(msg) => Err(KernelError(msg))
+  }
+}
+
+fn levels_undef(ls : List[Level], ps : List[Name]) -> Name? {
+  match ls {
+    Nil => None
+    Cons(l, rest) =>
+      match l.undef_param(ps) {
+        Some(n) => Some(n)
+        None => levels_undef(rest, ps)
+      }
+  }
+}
+
+// `HasType(k, e, t)`: `e` has type `t`, by the rules of the checking mode of
+// type inference
+enum HasType : (K, Expr, Expr) -> Prop {
+  // conversion
+  TConv[k : K, e : Expr, a : Expr, b : Expr](HasType(k, e, a), DefEq(k, a, b)) : HasType(k, e, b)
+  TSort[k : K, e : Expr, l : Level](view(k, e) === VSort(l), l.undef_param(k.tc.lparams) === None) : HasType(k, e, mk_sort(k, Succ(l)))
+  TConst[k : K, e : Expr, c : Name, ls : List[Level], ci : ConstInfo](
+    view(k, e) === VConst(c, ls),
+    env_find(k, c) === Some(ci),
+    ci.num_lparams(k) === list_length(ls),
+    levels_undef(ls, k.tc.lparams) === None,
+  ) : HasType(k, e, instantiate_lparams(k, ci.type, ci.lparams, ls))
+  TFVar[k : K, e : Expr, id : Int](view(k, e) === VFVar(id)) : HasType(k, e, local_type(k, id))
+  TNat[k : K, e : Expr, n : Nat](view(k, e) === VNatLit(n)) : HasType(k, e, mk_const(k, k.names.nat, Nil))
+  TStr[k : K, e : Expr, s : String](view(k, e) === VStrLit(s)) : HasType(k, e, mk_const(k, k.names.string, Nil))
+  TApp[k : K, e : Expr, f : Expr, a : Expr, ft : Expr, p : Expr, n : Name, dom : Expr, body : Expr, bi : BinderInfo, at : Expr](
+    view(k, e) === VApp(f, a),
+    HasType(k, f, ft),
+    Red(k, ft, p),
+    view(k, p) === VPi(n, dom, body, bi),
+    HasType(k, a, at),
+    DefEq(k, dom, at),
+  ) : HasType(k, e, instantiate1(k, body, a))
+  // λ: the domain is a type; the body, for a new variable of the domain
+  TLam[k : K, e : Expr, n : Name, d : Expr, b : Expr, bi : BinderInfo, sd : Expr, sdn : Expr, u : Level, x : Expr, id : Int, bt : Expr](
+    view(k, e) === VLam(n, d, b, bi),
+    HasType(k, d, sd),
+    Red(k, sd, sdn),
+    view(k, sdn) === VSort(u),
+    view(k, x) === VFVar(id),
+    local_type(k, id) === d,
+    local_value(k, id) === None,
+    HasType(k, instantiate1(k, b, x), bt),
+  ) : HasType(k, e, mk_pi_fvars(k, [x], cheap_beta_reduce(k, bt)))
+  TPi[k : K, e : Expr, n : Name, d : Expr, b : Expr, bi : BinderInfo, sd : Expr, sdn : Expr, u : Level, x : Expr, id : Int, sb : Expr, sbn : Expr, v : Level](
+    view(k, e) === VPi(n, d, b, bi),
+    HasType(k, d, sd),
+    Red(k, sd, sdn),
+    view(k, sdn) === VSort(u),
+    view(k, x) === VFVar(id),
+    local_type(k, id) === d,
+    local_value(k, id) === None,
+    HasType(k, instantiate1(k, b, x), sb),
+    Red(k, sb, sbn),
+    view(k, sbn) === VSort(v),
+  ) : HasType(k, e, mk_sort(k, mk_imax(u, v)))
+  // let: the type is a type, the value has it; the body, for a variable
+  // standing for the value
+  TLet[k : K, e : Expr, n : Name, t : Expr, v : Expr, b : Expr, st : Expr, stn : Expr, u : Level, vt : Expr, x : Expr, id : Int, bt : Expr](
+    view(k, e) === VLet(n, t, v, b),
+    HasType(k, t, st),
+    Red(k, st, stn),
+    view(k, stn) === VSort(u),
+    HasType(k, v, vt),
+    DefEq(k, vt, t),
+    view(k, x) === VFVar(id),
+    local_type(k, id) === t,
+    local_value(k, id) === Some(v),
+    HasType(k, instantiate1(k, b, x), bt),
+  ) : HasType(k, e, mk_pi_fvars(k, [x], cheap_beta_reduce(k, bt)))
+  // trusted: the type of a projection
+  TProj[k : K, e : Expr, n : Name, i : Int, x : Expr, st : Expr, t : Expr](
+    view(k, e) === VProj(n, i, x),
+    HasType(k, x, st),
+    proj_type(k, e, n, i, x, st) === Ok(t),
+  ) : HasType(k, e, t)
+}
+
+// a type of `e` with the derivation
+enum TypeOf : (K, Expr) -> Type {
+  MkTypeOf[k : K, e : Expr](t : Expr, p : HasType(k, e, t)) : TypeOf(k, e)
+}
+
+fn[k : K, e : Expr] TypeOf::ty(self : TypeOf(k, e)) -> Expr {
+  match self {
+    MkTypeOf(t, _) => t
+  }
+}
+
+// a cache entry of the checking mode
+enum AnyHas {
+  MkAnyHas(k : K, e : Expr, t : Expr, p : HasType(k, e, t))
+}
+
+fn AnyHas::ty(self : AnyHas) -> Expr {
+  match self {
+    MkAnyHas(_, _, t, _) => t
+  }
+}
+
+fn any_has_get(k : K, e : Expr, a : AnyHas) -> TypeOf(k, e)? {
+  match a {
+    MkAnyHas(k2, e2, t, p) =>
+      match ptr_deq(k2, k) {
+        Proved(Refl) =>
+          match Int::deq(e2, e) {
+            Yes(Refl) => Some(MkTypeOf(t, p))
+            No(_) => None
+          }
+        Unknown => None
+      }
+  }
+}
+
+// `t` reduces to a sort
+enum SortOf : (K, Expr) -> Type {
+  MkSortOf[k : K, t : Expr](s : Expr, u : Level, p : Red(k, t, s), e : view(k, s) === VSort(u)) : SortOf(k, t)
+}
+
+// `t` reduces to a pi
+enum PiOf : (K, Expr) -> Type {
+  MkPiOf[k : K, t : Expr](p : Expr, n : Name, dom : Expr, body : Expr, bi : BinderInfo, r : Red(k, t, p), e : view(k, p) === VPi(n, dom, body, bi)) : PiOf(k, t)
+}
