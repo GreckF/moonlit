@@ -1,0 +1,73 @@
+// General utilities: errors, the inspect idiom, lists.
+
+suberror KernelError {
+  KernelError(String)
+}
+
+fn[T] kfail(msg : String) -> T raise KernelError {
+  raise KernelError(msg)
+}
+
+// `inspect(x)` remembers the equation `x === y` when matching on `y`.
+enum Sing[A](x : A) {
+  MkSing(y : A, eq : x === y)
+}
+
+fn[A] inspect(x : A) -> Sing[A](x) {
+  MkSing(x, Refl)
+}
+
+// ---- lists ---------------------------------------------------------------------
+
+fn[T] list_length(xs : List[T]) -> Int {
+  let mut n = 0
+  let mut cur = xs
+  while cur is Cons(_, rest) {
+    n = n + 1
+    cur = rest
+  }
+  n
+}
+
+fn[T] list_nth(xs : List[T], i : Int) -> T? {
+  match xs {
+    Nil => None
+    Cons(x, rest) => if i == 0 { Some(x) } else { list_nth(rest, i - 1) }
+  }
+}
+
+fn[T] list_of_array(xs : Array[T]) -> List[T] {
+  let mut r : List[T] = Nil
+  for i = xs.length() - 1; i >= 0; i = i - 1 {
+    r = Cons(xs[i], r)
+  }
+  r
+}
+
+fn[T] array_of_list(xs : List[T]) -> Array[T] {
+  let out : Array[T] = Array::new()
+  let mut cur = xs
+  while cur is Cons(x, rest) {
+    out.push(x)
+    cur = rest
+  }
+  out
+}
+
+fn combine_hash(a : Int, b : Int) -> Int {
+  (a * 31 + b) ^ (a >> 7)
+}
+
+// The state of the kernel, passed to every function that reads or changes it
+// (functions that read global variables are not compiled to native code).
+struct K {
+  arena : Arena
+  env : Env
+  lctx : LCtx
+  tc : Tc
+  names : Names
+}
+
+fn K::new() -> K {
+  { arena: Arena::new(), env: Env::new(), lctx: LCtx::new(), tc: Tc::new(), names: Names::new() }
+}

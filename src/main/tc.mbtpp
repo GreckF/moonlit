@@ -1,0 +1,1511 @@
+// The type checker: type inference, weak head normalization and definitional
+// equality, following lean4lean's `TypeChecker.lean`.
+
+struct Tc {
+  mut infer_i : HashMap[Int, Expr]
+  mut infer_c : HashMap[Int, Expr]
+  mut whnf_core_c : HashMap[Int, Expr]
+  mut whnf_c : HashMap[Int, Expr]
+  mut failure : HashMap[(Int, Int), Bool]
+  // union-find over expressions known to be definitionally equal
+  mut uf : HashMap[Int, Int]
+  // values of constants (`c.{ls}` as a node) with the levels substituted, and
+  // recursor rules (`rec.{ls}` node, rule index): these depend only on the
+  // environment, so they are kept across declarations
+  unfold_c : HashMap[Int, Expr]
+  rule_c : HashMap[(Int, Int), Expr]
+  mut lparams : List[Name]
+  mut safety : Safety
+  mut eager : Bool
+  // counters for profiling: see `stat_names`
+  stats : Array[Int]
+  // every cache write since the declaration started: (cache, key, key2),
+  // to purge the entries that mention collected nodes
+  log_c : Array[Int]
+  log_a : Array[Int]
+  log_b : Array[Int]
+  mut log_len : Int
+}
+
+const C_INFER_I : Int = 0
+const C_INFER_C : Int = 1
+const C_WHNF_CORE : Int = 2
+const C_WHNF : Int = 3
+const C_FAILURE : Int = 4
+const C_UF : Int = 5
+const C_UNFOLD : Int = 6
+const C_RULE : Int = 7
+
+// a region collects when it created more nodes than this
+const GC_THRESHOLD : Int = 200000
+
+fn tc_log(k : K, c : Int, x : Int, y : Int) -> Unit {
+  let t = k.tc
+  put_at(t.log_c, t.log_len, c)
+  put_at(t.log_a, t.log_len, x)
+  put_at(t.log_b, t.log_len, y)
+  t.log_len = t.log_len + 1
+}
+
+fn cache_of(k : K, c : Int) -> HashMap[Int, Expr] {
+  if c == C_INFER_I {
+    k.tc.infer_i
+  } else if c == C_INFER_C {
+    k.tc.infer_c
+  } else if c == C_WHNF_CORE {
+    k.tc.whnf_core_c
+  } else if c == C_WHNF {
+    k.tc.whnf_c
+  } else if c == C_UF {
+    k.tc.uf
+  } else {
+    k.tc.unfold_c
+  }
+}
+
+// Remove the cache entries written since `lmark` that mention nodes `>= mark`.
+fn tc_purge(k : K, mark : Int, lmark : Int) -> Unit {
+  let t = k.tc
+  let mut out = lmark
+  for i = lmark; i < t.log_len; i = i + 1 {
+    let c = t.log_c[i]
+    let x = t.log_a[i]
+    let y = t.log_b[i]
+    let keep = if c == C_FAILURE {
+      if x >= mark || y >= mark {
+        t.failure.remove((x, y))
+        false
+      } else {
+        true
+      }
+    } else if c == C_RULE {
+      match t.rule_c.get((x, y)) {
+        Some(v) =>
+          if x >= mark || y >= mark || v >= mark {
+            t.rule_c.remove((x, y))
+            false
+          } else {
+            true
+          }
+        None => false
+      }
+    } else {
+      let m = cache_of(k, c)
+      match m.get(x) {
+        Some(v) =>
+          if x >= mark || v >= mark {
+            m.remove(x)
+            false
+          } else {
+            true
+          }
+        None => false
+      }
+    }
+    if keep {
+      t.log_c[out] = c
+      t.log_a[out] = x
+      t.log_b[out] = y
+      out = out + 1
+    }
+  }
+  t.log_len = out
+}
+
+// Collect the nodes created since `mark`, keeping those of `root`.
+fn gc_region(k : K, mark : Int, lmark : Int, root : Expr) -> Expr {
+  tc_purge(k, mark, lmark)
+  arena_collect(k, mark, root)
+}
+
+const ST_WHNF : Int = 0
+const ST_WHNF_HIT : Int = 1
+const ST_DEFEQ : Int = 2
+const ST_IOTA : Int = 3
+const ST_DELTA : Int = 4
+const ST_INFER : Int = 5
+const ST_INFER_HIT : Int = 6
+const ST_BETA : Int = 7
+
+fn stat_names() -> Array[String] {
+  ["whnf", "whnf_hit", "defeq", "iota", "delta", "infer", "infer_hit", "beta"]
+}
+
+fn bump(k : K, i : Int) -> Unit {
+  k.tc.stats[i] = k.tc.stats[i] + 1
+}
+
+fn Tc::new() -> Tc {
+  {
+  infer_i: HashMap::new(),
+  infer_c: HashMap::new(),
+  whnf_core_c: HashMap::new(),
+  whnf_c: HashMap::new(),
+  failure: HashMap::new(),
+  uf: HashMap::new(),
+  unfold_c: HashMap::new(),
+  rule_c: HashMap::new(),
+  lparams: Nil,
+  safety: SafeDecl,
+  eager: false,
+  stats: Array::make(8, 0),
+  log_c: Array::new(),
+  log_a: Array::new(),
+  log_b: Array::new(),
+  log_len: 0,
+  }
+}
+
+fn tc_reset(k : K, lparams : List[Name], safety : Safety) -> Unit {
+  k.tc.infer_i = HashMap::new()
+  k.tc.infer_c = HashMap::new()
+  k.tc.whnf_core_c = HashMap::new()
+  k.tc.whnf_c = HashMap::new()
+  k.tc.failure = HashMap::new()
+  k.tc.uf = HashMap::new()
+  k.tc.log_len = 0
+  k.tc.lparams = lparams
+  k.tc.safety = safety
+  k.tc.eager = false
+}
+
+const WHNF_FUEL : Int = 1000000
+
+const LAZY_FUEL : Int = 1000000
+
+// ---- equivalence manager ------------------------------------------------------------
+
+fn uf_find(k : K, e : Int) -> Int {
+  let mut r = e
+  while true {
+    match k.tc.uf.get(r) {
+      Some(p) => if p == r { break } else { r = p }
+      None => break
+    }
+  }
+  // path compression
+  let mut c = e
+  while c != r {
+    match k.tc.uf.get(c) {
+      Some(p) => {
+        k.tc.uf.set(c, r)
+        tc_log(k, C_UF, c, 0)
+        c = p
+      }
+      None => break
+    }
+  }
+  r
+}
+
+fn uf_merge(k : K, a : Int, b : Int) -> Unit {
+  let ra = uf_find(k, a)
+  let rb = uf_find(k, b)
+  if ra != rb {
+    k.tc.uf.set(ra, rb)
+    tc_log(k, C_UF, ra, 0)
+  }
+}
+
+fn eqv_is_equiv(k : K, a : Expr, b : Expr) -> Bool {
+  a == b || uf_find(k, a) == uf_find(k, b)
+}
+
+// ---- basic helpers ---------------------------------------------------------------------
+
+fn ensure_sort_core(k : K, e : Expr, s : Expr) -> Expr raise KernelError {
+  if is_sort(k, e) {
+    return e
+  }
+  let e2 = whnf(k, e)
+  if is_sort(k, e2) {
+    e2
+  } else {
+    kfail("type expected: " + show_expr(k, s))
+  }
+}
+
+fn ensure_pi_core(k : K, e : Expr, s : Expr) -> Expr raise KernelError {
+  if is_pi(k, e) {
+    return e
+  }
+  let e2 = whnf(k, e)
+  if is_pi(k, e2) {
+    e2
+  } else {
+    kfail("function expected: " + show_expr(k, s))
+  }
+}
+
+fn check_level(k : K, l : Level) -> Unit raise KernelError {
+  match l.undef_param(k.tc.lparams) {
+    Some(n) => kfail("undefined universe level parameter '\{n}'")
+    None => ()
+  }
+}
+
+fn infer_constant(k : K, e : Expr, n : Name, ls : List[Level], infer_only : Bool) -> Expr raise KernelError {
+  let info = env_get(k, n)
+  if info.num_lparams(k) != list_length(ls) {
+    kfail("incorrect number of universe levels for '\{n}'")
+  }
+  if not(infer_only) {
+    if info.is_unsafe(k) {
+      match k.tc.safety {
+        UnsafeDecl => ()
+        _ => kfail("invalid declaration, it uses unsafe declaration '\{n}'")
+      }
+    }
+    if info.is_partial(k) {
+      match k.tc.safety {
+        SafeDecl => kfail("invalid declaration, safe declaration must not contain partial declaration '\{n}'")
+        _ => ()
+      }
+    }
+    let mut cur = ls
+    while cur is Cons(l, rest) {
+      check_level(k, l)
+      cur = rest
+    }
+  }
+  ignore(e)
+  instantiate_lparams(k, info.type, info.lparams, ls)
+}
+
+// `(fun x1 .. xn => b) a1 .. am` without substitution, when cheap.
+fn cheap_beta_reduce(k : K, e : Expr) -> Expr {
+  if not(is_app(k, e)) {
+    return e
+  }
+  let f = get_app_fn(k, e)
+  if not(is_lam(k, f)) {
+    return e
+  }
+  let args = get_app_args(k, e)
+  let mut i = 0
+  let mut body = f
+  while i < args.length() && is_lam(k, body) {
+    body = binding_body(k, body)
+    i = i + 1
+  }
+  if not(has_loose_bvars(k, body)) {
+    mk_app_range(k, body, args, i, args.length())
+  } else {
+    match view(k, body) {
+      VBVar(n) => mk_app_range(k, args[i - n - 1], args, i, args.length())
+      _ => e
+    }
+  }
+}
+
+// ---- type inference ----------------------------------------------------------------------
+
+fn infer_type(k : K, e : Expr) -> Expr raise KernelError {
+  infer_type_core(k, e, true)
+}
+
+fn check_type(k : K, e : Expr) -> Expr raise KernelError {
+  infer_type_core(k, e, false)
+}
+
+fn infer_type_core(k : K, e : Expr, infer_only : Bool) -> Expr raise KernelError {
+  if has_loose_bvars(k, e) {
+    kfail("type checker does not support loose bound variables")
+  }
+  let cache = if infer_only { k.tc.infer_i } else { k.tc.infer_c }
+  bump(k, ST_INFER)
+  match cache.get(e) {
+    Some(r) => {
+      bump(k, ST_INFER_HIT)
+      return r
+    }
+    None => ()
+  }
+  let r = match view(k, e) {
+    VNatLit(_) => {
+      if not(infer_only) {
+        ignore(env_get(k, k.names.nat))
+      }
+      mk_const(k, k.names.nat, Nil)
+    }
+    VStrLit(_) => {
+      if not(infer_only) {
+        ignore(env_get(k, k.names.char_of_nat))
+        ignore(env_get(k, k.names.string_of_list))
+      }
+      mk_const(k, k.names.string, Nil)
+    }
+    VProj(s, idx, x) => infer_proj(k, e, s, idx, x, infer_type_core(k, x, infer_only))
+    VFVar(id) => local_type(k, id)
+    VBVar(_) => kfail("unexpected bound variable")
+    VSort(l) => {
+      if not(infer_only) {
+        check_level(k, l)
+      }
+      mk_sort(k, Succ(l))
+    }
+    VConst(n, ls) => infer_constant(k, e, n, ls, infer_only)
+    VLam(_, _, _, _) => infer_lambda(k, e, infer_only)
+    VPi(_, _, _, _) => infer_pi(k, e, infer_only)
+    VApp(f, a) =>
+      if infer_only {
+        infer_app(k, e)
+      } else {
+        let ftype = ensure_pi_core(k, infer_type_core(k, f, infer_only), e)
+        let atype = infer_type_core(k, a, infer_only)
+        let dtype = binding_domain(k, ftype)
+        let ok = if get_app_num_args(k, a) == 2 && is_const_of(k, get_app_fn(k, a), k.names.eager_reduce) {
+          let saved = k.tc.eager
+          k.tc.eager = true
+          let r = is_def_eq(k, dtype, atype)
+          k.tc.eager = saved
+          r
+        } else {
+          is_def_eq(k, dtype, atype)
+        }
+        if not(ok) {
+          kfail("application type mismatch: " + show_expr(k, e))
+        }
+        instantiate1(k, binding_body(k, ftype), a)
+      }
+    VLet(_, _, _, _) => infer_let(k, e, infer_only)
+  }
+  cache.set(e, r)
+  tc_log(k, if infer_only { C_INFER_I } else { C_INFER_C }, e, 0)
+  r
+}
+
+fn infer_lambda(k : K, e0 : Expr, infer_only : Bool) -> Expr raise KernelError {
+  let fvars : Array[Expr] = Array::new()
+  let mut e = e0
+  while is_lam(k, e) {
+    let d = instantiate_rev(k, binding_domain(k, e), fvars)
+    if not(infer_only) {
+      ignore(ensure_sort_core(k, infer_type_core(k, d, infer_only), d))
+    }
+    fvars.push(mk_local_decl(k, binding_name(k, e), d))
+    e = binding_body(k, e)
+  }
+  let r = infer_type_core(k, instantiate_rev(k, e, fvars), infer_only)
+  mk_pi_fvars(k, fvars, cheap_beta_reduce(k, r))
+}
+
+fn infer_pi(k : K, e0 : Expr, infer_only : Bool) -> Expr raise KernelError {
+  let fvars : Array[Expr] = Array::new()
+  let us : Array[Level] = Array::new()
+  let mut e = e0
+  while is_pi(k, e) {
+    let d = instantiate_rev(k, binding_domain(k, e), fvars)
+    let t1 = ensure_sort_core(k, infer_type_core(k, d, infer_only), d)
+    us.push(sort_level(k, t1))
+    fvars.push(mk_local_decl(k, binding_name(k, e), d))
+    e = binding_body(k, e)
+  }
+  let body = instantiate_rev(k, e, fvars)
+  let s = ensure_sort_core(k, infer_type_core(k, body, infer_only), body)
+  let mut l = sort_level(k, s)
+  for i = us.length() - 1; i >= 0; i = i - 1 {
+    l = mk_imax(us[i], l)
+  }
+  mk_sort(k, l)
+}
+
+fn infer_app(k : K, e : Expr) -> Expr raise KernelError {
+  let f = get_app_fn(k, e)
+  let args = get_app_args(k, e)
+  let mut ftype = infer_type_core(k, f, true)
+  let mut j = 0
+  for i = 0; i < args.length(); i = i + 1 {
+    if is_pi(k, ftype) {
+      ftype = binding_body(k, ftype)
+    } else {
+      ftype = instantiate_rev(k, ftype, args.slice(j, i))
+      ftype = binding_body(k, ensure_pi_core(k, ftype, e))
+      j = i
+    }
+  }
+  instantiate_rev(k, ftype, args.slice(j, args.length()))
+}
+
+fn infer_let(k : K, e0 : Expr, infer_only : Bool) -> Expr raise KernelError {
+  let fvars : Array[Expr] = Array::new()
+  let mut e = e0
+  while kind_of(k, e) == K_LET {
+    match view(k, e) {
+      VLet(n, t0, v0, b) => {
+        let t = instantiate_rev(k, t0, fvars)
+        let v = instantiate_rev(k, v0, fvars)
+        if not(infer_only) {
+          ignore(ensure_sort_core(k, infer_type_core(k, t, infer_only), t))
+          let vt = infer_type_core(k, v, infer_only)
+          if not(is_def_eq(k, vt, t)) {
+            kfail("let type mismatch: " + n.to_string())
+          }
+        }
+        fvars.push(mk_let_decl(k, n, t, v))
+        e = b
+      }
+      _ => break
+    }
+  }
+  let r = infer_type_core(k, instantiate_rev(k, e, fvars), infer_only)
+  mk_pi_fvars(k, fvars, cheap_beta_reduce(k, r))
+}
+
+fn get_sort_level(k : K, e : Expr) -> Level raise KernelError {
+  sort_level(k, ensure_sort_core(k, infer_type(k, e), e))
+}
+
+fn is_prop(k : K, e : Expr) -> Bool raise KernelError {
+  get_sort_level(k, e).is_always_zero()
+}
+
+fn infer_proj(k : K, e : Expr, tname : Name, idx : Int, s : Expr, stype : Expr) -> Expr raise KernelError {
+  let t = whnf(k, stype)
+  let i_fn = get_app_fn(k, t)
+  let args = get_app_args(k, t)
+  let i_name = match const_name(k, i_fn) {
+    Some(n) => n
+    None => kfail("invalid projection: " + show_expr(k, e))
+  }
+  if i_name != tname {
+    kfail("invalid projection: " + show_expr(k, e))
+  }
+  let ival = match env_find_induct(k, i_name) {
+    Some(v) => v
+    None => kfail("invalid projection: " + show_expr(k, e))
+  }
+  let c = match ival.ctors {
+    Cons(c, Nil) => c
+    _ => kfail("invalid projection: " + show_expr(k, e))
+  }
+  if args.length() != ival.nparams + ival.nindices {
+    kfail("invalid projection: " + show_expr(k, e))
+  }
+  let cinfo = env_get(k, c)
+  let mut r = instantiate_lparams(k, cinfo.type, cinfo.lparams, const_levels(k, i_fn))
+  for i = 0; i < ival.nparams; i = i + 1 {
+    let rw = whnf(k, r)
+    if not(is_pi(k, rw)) {
+      kfail("invalid projection: " + show_expr(k, e))
+    }
+    r = instantiate1(k, binding_body(k, rw), args[i])
+  }
+  let maybe_prop = not(get_sort_level(k, t).is_never_zero())
+  for i = 0; i < idx; i = i + 1 {
+    let rw = whnf(k, r)
+    if not(is_pi(k, rw)) {
+      kfail("invalid projection: " + show_expr(k, e))
+    }
+    let b = binding_body(k, rw)
+    if has_loose_bvars(k, b) {
+      // prop structures cannot have non-prop dependent fields
+      if maybe_prop && not(is_prop(k, binding_domain(k, rw))) {
+        kfail("invalid projection: " + show_expr(k, e))
+      }
+      r = instantiate1(k, b, mk_proj(k, i_name, i, s))
+    } else {
+      r = b
+    }
+  }
+  let rw = whnf(k, r)
+  if not(is_pi(k, rw)) {
+    kfail("invalid projection: " + show_expr(k, e))
+  }
+  let dom = binding_domain(k, rw)
+  if maybe_prop && not(is_prop(k, dom)) {
+    kfail("invalid projection: " + show_expr(k, e))
+  }
+  dom
+}
+
+// ---- weak head normalization ---------------------------------------------------------------
+
+fn is_let_fvar(k : K, e : Expr) -> Bool {
+  kind_of(k, e) == K_FVAR && k.lctx.decls[fvar_id(k, e)].value >= 0
+}
+
+fn whnf_core(k : K, e : Expr) -> Expr raise KernelError {
+  whnf_core_p(k, e, false)
+}
+
+fn whnf_core_p(k : K, e : Expr, cheap_proj : Bool) -> Expr raise KernelError {
+  let kd = kind_of(k, e)
+  if kd == K_BVAR || kd == K_SORT || kd == K_PI || kd == K_CONST || kd == K_LAM || kd == K_NAT || kd == K_STR {
+    return e
+  }
+  if kd == K_FVAR && not(is_let_fvar(k, e)) {
+    return e
+  }
+  match k.tc.whnf_core_c.get(e) {
+    Some(r) => return r
+    None => ()
+  }
+  let r = if kd == K_FVAR {
+    match local_value(k, fvar_id(k, e)) {
+      Some(v) => whnf_core_p(k, v, cheap_proj)
+      None => e
+    }
+  } else if kd == K_APP {
+    let f0 = get_app_fn(k, e)
+    let f = whnf_core_p(k, f0, cheap_proj)
+    if is_lam(k, f) {
+      let args = get_app_args(k, e)
+      let mut m = 0
+      let mut body = f
+      while m < args.length() && is_lam(k, body) {
+        body = binding_body(k, body)
+        m = m + 1
+      }
+      bump(k, ST_BETA)
+      let r = mk_app_range(k, instantiate_rev(k, body, args.slice(0, m)), args, m, args.length())
+      whnf_core_p(k, r, cheap_proj)
+    } else if f == f0 {
+      match reduce_recursor(k, e) {
+        Some(r) => whnf_core_p(k, r, cheap_proj)
+        None => e
+      }
+    } else {
+      let r = mk_app_n(k, f, get_app_args(k, e))
+      whnf_core_p(k, r, cheap_proj)
+    }
+  } else if kd == K_LET {
+    match view(k, e) {
+      VLet(_, _, v, b) => whnf_core_p(k, instantiate1(k, b, v), cheap_proj)
+      _ => e
+    }
+  } else {
+    match view(k, e) {
+      VProj(_, idx, s) =>
+        match reduce_proj(k, idx, s, cheap_proj) {
+          Some(m) => whnf_core_p(k, m, cheap_proj)
+          None => e
+        }
+      _ => e
+    }
+  }
+  if not(cheap_proj) {
+    k.tc.whnf_core_c.set(e, r)
+    tc_log(k, C_WHNF_CORE, e, 0)
+  }
+  r
+}
+
+fn reduce_proj_core(k : K, idx : Int, s0 : Expr) -> Expr? raise KernelError {
+  let s = match view(k, s0) {
+    VStrLit(str) => whnf(k, str_lit_to_ctor(k, str))
+    _ => s0
+  }
+  let mk = get_app_fn(k, s)
+  match const_name(k, mk) {
+    Some(c) =>
+      match env_find_ctor(k, c) {
+        Some(cv) => {
+          let args = get_app_args(k, s)
+          let i = cv.nparams + idx
+          if i < args.length() { Some(args[i]) } else { None }
+        }
+        None => None
+      }
+    None => None
+  }
+}
+
+fn reduce_proj(k : K, idx : Int, s : Expr, cheap_proj : Bool) -> Expr? raise KernelError {
+  let c = if cheap_proj { whnf_core_p(k, s, cheap_proj) } else { whnf(k, s) }
+  reduce_proj_core(k, idx, c)
+}
+
+fn reduce_recursor(k : K, e : Expr) -> Expr? raise KernelError {
+  if k.env.quot_init {
+    match quot_reduce_rec(k, e) {
+      Some(r) => return Some(r)
+      None => ()
+    }
+  }
+  inductive_reduce_rec(k, e)
+}
+
+// The definition a constant head can be unfolded to.
+fn is_delta(k : K, e : Expr) -> ConstInfo? {
+  let f = get_app_fn(k, e)
+  match view(k, f) {
+    VConst(n, ls) =>
+      match env_find(k, n) {
+        Some(ci) =>
+          match ci.delta_value(k) {
+            Some(_) => if ci.num_lparams(k) == list_length(ls) { Some(ci) } else { None }
+            None => None
+          }
+        None => None
+      }
+    _ => None
+  }
+}
+
+fn unfold_definition_core(k : K, e : Expr) -> Expr? {
+  match view(k, e) {
+    VConst(_, ls) =>
+      match is_delta(k, e) {
+        Some(ci) =>
+          match ci.delta_value(k) {
+            Some(v) =>
+              match k.tc.unfold_c.get(e) {
+                Some(r) => Some(r)
+                None => {
+                  let r = instantiate_lparams(k, v, ci.lparams, ls)
+                  k.tc.unfold_c.set(e, r)
+                  tc_log(k, C_UNFOLD, e, 0)
+                  Some(r)
+                }
+              }
+            None => None
+          }
+        None => None
+      }
+    _ => None
+  }
+}
+
+fn unfold_definition(k : K, e : Expr) -> Expr? {
+  if is_app(k, e) {
+    match unfold_definition_core(k, get_app_fn(k, e)) {
+      Some(f) => Some(mk_app_n(k, f, get_app_args(k, e)))
+      None => None
+    }
+  } else {
+    unfold_definition_core(k, e)
+  }
+}
+
+fn whnf(k : K, e : Expr) -> Expr raise KernelError {
+  let kd = kind_of(k, e)
+  if kd == K_BVAR || kd == K_SORT || kd == K_PI || kd == K_NAT || kd == K_STR {
+    return e
+  }
+  if kd == K_FVAR && not(is_let_fvar(k, e)) {
+    return e
+  }
+  bump(k, ST_WHNF)
+  match k.tc.whnf_c.get(e) {
+    Some(r) => {
+      bump(k, ST_WHNF_HIT)
+      return r
+    }
+    None => ()
+  }
+  // a region: the nodes this call creates, but for the result, are garbage
+  let mark = arena_size(k)
+  let lmark = k.tc.log_len
+  let mut t = e
+  let mut fuel = WHNF_FUEL
+  while true {
+    if fuel <= 0 {
+      kfail("deterministic timeout (whnf)")
+    }
+    fuel = fuel - 1
+    if arena_size(k) - mark > GC_THRESHOLD {
+      t = gc_region(k, mark, lmark, t)
+    }
+    t = whnf_core(k, t)
+    match reduce_nat(k, t) {
+      Some(r) => {
+        t = r
+        break
+      }
+      None => ()
+    }
+    match unfold_definition(k, t) {
+      Some(r) => {
+        bump(k, ST_DELTA)
+        t = r
+      }
+      None => break
+    }
+  }
+  if arena_size(k) - mark > GC_THRESHOLD {
+    t = gc_region(k, mark, lmark, t)
+  }
+  k.tc.whnf_c.set(e, t)
+  tc_log(k, C_WHNF, e, 0)
+  t
+}
+
+// ---- Nat and String literals ---------------------------------------------------------------
+
+fn nat_lit_value(k : K, e : Expr) -> Nat? {
+  match view(k, e) {
+    VNatLit(n) => Some(n)
+    VConst(n, Nil) => if n == k.names.nat_zero { Some(Z) } else { None }
+    _ => None
+  }
+}
+
+fn nat_lit_to_ctor(k : K, n : Nat) -> Expr {
+  if n == Z {
+    mk_const(k, k.names.nat_zero, Nil)
+  } else {
+    mk_app(k, mk_const(k, k.names.nat_succ, Nil), mk_nat_lit(k, n - 1))
+  }
+}
+
+fn str_lit_to_ctor(k : K, s : String) -> Expr {
+  let char = mk_const(k, k.names.char, Nil)
+  let nil = mk_app(k, mk_const(k, k.names.list_nil, Cons(Zero, Nil)), char)
+  let cons = mk_app(k, mk_const(k, k.names.list_cons, Cons(Zero, Nil)), char)
+  let of_nat = mk_const(k, k.names.char_of_nat, Nil)
+  let codes = string_code_points(k, s)
+  let mut r = nil
+  for i = codes.length() - 1; i >= 0; i = i - 1 {
+    r = mk_app(k, mk_app(k, cons, mk_app(k, of_nat, mk_nat_lit(k, int_to_nat(codes[i])))), r)
+  }
+  mk_app(k, mk_const(k, k.names.string_of_list, Nil), r)
+}
+
+// The code points of a string (combining UTF-16 surrogate pairs).
+fn string_code_points(k : K, s : String) -> Array[Int] {
+  let out : Array[Int] = Array::new()
+  let mut i = 0
+  while i < s.length() {
+    let c = s[i].to_int()
+    if c >= 0xD800 && c < 0xDC00 && i + 1 < s.length() {
+      let lo = s[i + 1].to_int()
+      if lo >= 0xDC00 && lo < 0xE000 {
+        out.push(0x10000 + (c - 0xD800) * 0x400 + (lo - 0xDC00))
+        i = i + 2
+        continue
+      }
+    }
+    out.push(c)
+    i = i + 1
+  }
+  out
+}
+
+fn mk_bool(k : K, b : Bool) -> Expr {
+  mk_const(k, if b { k.names.bool_true } else { k.names.bool_false }, Nil)
+}
+
+// Literal arithmetic with Lean's conventions (truncated subtraction, division
+// by zero is zero, remainder by zero is the dividend), which `Nat` follows.
+fn nat_bin_op(k : K, f : Name, a : Nat, b : Nat) -> Expr? {
+  let limit : Nat = 16777216
+  if f == k.names.nat_add {
+    Some(mk_nat_lit(k, a + b))
+  } else if f == k.names.nat_sub {
+    Some(mk_nat_lit(k, a - b))
+  } else if f == k.names.nat_mul {
+    Some(mk_nat_lit(k, a * b))
+  } else if f == k.names.nat_pow {
+    if b > limit { None } else { Some(mk_nat_lit(k, a.pow(b))) }
+  } else if f == k.names.nat_gcd {
+    Some(mk_nat_lit(k, a.gcd(b)))
+  } else if f == k.names.nat_mod {
+    Some(mk_nat_lit(k, a % b))
+  } else if f == k.names.nat_div {
+    Some(mk_nat_lit(k, a / b))
+  } else if f == k.names.nat_beq {
+    Some(mk_bool(k, a == b))
+  } else if f == k.names.nat_ble {
+    Some(mk_bool(k, a <= b))
+  } else if f == k.names.nat_land {
+    Some(mk_nat_lit(k, a & b))
+  } else if f == k.names.nat_lor {
+    Some(mk_nat_lit(k, a | b))
+  } else if f == k.names.nat_xor {
+    Some(mk_nat_lit(k, a ^ b))
+  } else if f == k.names.nat_shl {
+    if b > limit { None } else { Some(mk_nat_lit(k, a << b)) }
+  } else if f == k.names.nat_shr {
+    Some(mk_nat_lit(k, a >> b))
+  } else {
+    None
+  }
+}
+
+fn is_nat_bin_op(k : K, f : Name) -> Bool {
+  f == k.names.nat_add || f == k.names.nat_sub || f == k.names.nat_mul || f == k.names.nat_pow ||
+  f == k.names.nat_gcd || f == k.names.nat_mod || f == k.names.nat_div || f == k.names.nat_beq ||
+  f == k.names.nat_ble || f == k.names.nat_land || f == k.names.nat_lor || f == k.names.nat_xor ||
+  f == k.names.nat_shl || f == k.names.nat_shr
+}
+
+fn reduce_nat(k : K, e : Expr) -> Expr? raise KernelError {
+  if has_fvar(k, e) && not(k.tc.eager) {
+    // as Lean: literal arithmetic is only performed on closed terms
+    ()
+  }
+  let nargs = get_app_num_args(k, e)
+  if nargs == 1 {
+    let f = app_fn(k, e)
+    if is_const_of(k, f, k.names.nat_succ) {
+      match nat_lit_value(k, whnf(k, app_arg(k, e))) {
+        Some(v) => return Some(mk_nat_lit(k, v + 1))
+        None => return None
+      }
+    }
+    None
+  } else if nargs == 2 {
+    let f = get_app_fn(k, e)
+    match const_name(k, f) {
+      Some(fname) =>
+        if is_nat_bin_op(k, fname) {
+          let a = app_arg(k, app_fn(k, e))
+          let b = app_arg(k, e)
+          match nat_lit_value(k, whnf(k, a)) {
+            Some(va) =>
+              match nat_lit_value(k, whnf(k, b)) {
+                Some(vb) => nat_bin_op(k, fname, va, vb)
+                None => None
+              }
+            None => None
+          }
+        } else {
+          None
+        }
+      None => None
+    }
+  } else {
+    None
+  }
+}
+
+// ---- definitional equality ---------------------------------------------------------------
+
+// The three-valued answer of the quick checks.
+enum LBool {
+  LTrue
+  LFalse
+  LUndef
+}
+
+fn to_lbool(k : K, b : Bool) -> LBool {
+  if b { LTrue } else { LFalse }
+}
+
+fn is_def_eq(k : K, t : Expr, s : Expr) -> Bool raise KernelError {
+  let r = is_def_eq_core(k, t, s)
+  if r {
+    uf_merge(k, t, s)
+  }
+  r
+}
+
+fn quick_is_def_eq(k : K, t : Expr, s : Expr) -> LBool raise KernelError {
+  if eqv_is_equiv(k, t, s) {
+    return LTrue
+  }
+  let kt = kind_of(k, t)
+  let ks = kind_of(k, s)
+  if kt == K_LAM && ks == K_LAM {
+    to_lbool(k, is_def_eq_binding(k, t, s, K_LAM))
+  } else if kt == K_PI && ks == K_PI {
+    to_lbool(k, is_def_eq_binding(k, t, s, K_PI))
+  } else if kt == K_SORT && ks == K_SORT {
+    to_lbool(k, level_equiv(sort_level(k, t), sort_level(k, s)))
+  } else if (kt == K_NAT && ks == K_NAT) || (kt == K_STR && ks == K_STR) {
+    // literals are interned: equal literals are the same node
+    LFalse
+  } else {
+    LUndef
+  }
+}
+
+// Two lambdas (or two pis): compare the domains and the bodies under a new
+// free variable, delaying the substitution.
+fn is_def_eq_binding(k : K, t0 : Expr, s0 : Expr, bk : Int) -> Bool raise KernelError {
+  let subst : Array[Expr] = Array::new()
+  let mut t = t0
+  let mut s = s0
+  while kind_of(k, t) == bk && kind_of(k, s) == bk {
+    let tdom = binding_domain(k, t)
+    let sdom = binding_domain(k, s)
+    let mut stype = -1
+    if tdom != sdom {
+      let st = instantiate_rev(k, sdom, subst)
+      let tt = instantiate_rev(k, tdom, subst)
+      if not(is_def_eq(k, tt, st)) {
+        return false
+      }
+      stype = st
+    }
+    let tb = binding_body(k, t)
+    let sb = binding_body(k, s)
+    if has_loose_bvars(k, tb) || has_loose_bvars(k, sb) {
+      if stype < 0 {
+        stype = instantiate_rev(k, sdom, subst)
+      }
+      subst.push(mk_local_decl(k, binding_name(k, s), stype))
+    } else {
+      // the variable does not occur: any placeholder will do
+      subst.push(mk_sort(k, Zero))
+    }
+    t = tb
+    s = sb
+  }
+  is_def_eq(k, instantiate_rev(k, t, subst), instantiate_rev(k, s, subst))
+}
+
+fn is_def_eq_args(k : K, t : Expr, s : Expr) -> Bool raise KernelError {
+  let mut a = t
+  let mut b = s
+  while is_app(k, a) && is_app(k, b) {
+    if not(is_def_eq(k, app_arg(k, a), app_arg(k, b))) {
+      return false
+    }
+    a = app_fn(k, a)
+    b = app_fn(k, b)
+  }
+  not(is_app(k, a)) && not(is_app(k, b))
+}
+
+fn try_eta_expansion_core(k : K, t : Expr, s : Expr) -> Bool raise KernelError {
+  if is_lam(k, t) && not(is_lam(k, s)) {
+    let st = whnf(k, infer_type(k, s))
+    match view(k, st) {
+      VPi(n, ty, _, bi) => is_def_eq(k, t, mk_lam(k, n, ty, mk_app(k, lift_loose_bvars(k, s, 0, 1), mk_bvar(k, 0)), bi))
+      _ => false
+    }
+  } else {
+    false
+  }
+}
+
+fn try_eta_expansion(k : K, t : Expr, s : Expr) -> Bool raise KernelError {
+  try_eta_expansion_core(k, t, s) || try_eta_expansion_core(k, s, t)
+}
+
+fn try_eta_struct_core(k : K, t : Expr, s : Expr) -> Bool raise KernelError {
+  let f = get_app_fn(k, s)
+  let fname = match const_name(k, f) {
+    Some(n) => n
+    None => return false
+  }
+  let cv = match env_find_ctor(k, fname) {
+    Some(v) => v
+    None => return false
+  }
+  if get_app_num_args(k, s) != cv.nparams + cv.nfields {
+    return false
+  }
+  if not(is_non_rec_structure(k, cv.induct)) {
+    return false
+  }
+  if not(is_def_eq(k, infer_type(k, t), infer_type(k, s))) {
+    return false
+  }
+  let args = get_app_args(k, s)
+  for i = cv.nparams; i < args.length(); i = i + 1 {
+    if not(is_def_eq(k, mk_proj(k, cv.induct, i - cv.nparams, t), args[i])) {
+      return false
+    }
+  }
+  true
+}
+
+fn try_eta_struct(k : K, t : Expr, s : Expr) -> Bool raise KernelError {
+  try_eta_struct_core(k, t, s) || try_eta_struct_core(k, s, t)
+}
+
+fn is_def_eq_app(k : K, t : Expr, s : Expr) -> Bool raise KernelError {
+  if not(is_app(k, t)) || not(is_app(k, s)) {
+    return false
+  }
+  let ta = get_app_args(k, t)
+  let sa = get_app_args(k, s)
+  if ta.length() != sa.length() {
+    return false
+  }
+  if not(is_def_eq(k, get_app_fn(k, t), get_app_fn(k, s))) {
+    return false
+  }
+  for i = 0; i < ta.length(); i = i + 1 {
+    if not(is_def_eq(k, ta[i], sa[i])) {
+      return false
+    }
+  }
+  true
+}
+
+fn is_def_eq_proof_irrel(k : K, t : Expr, s : Expr) -> LBool raise KernelError {
+  let tt = infer_type(k, t)
+  if not(is_prop(k, tt)) {
+    return LUndef
+  }
+  to_lbool(k, is_def_eq(k, tt, infer_type(k, s)))
+}
+
+fn failure_key(k : K, t : Expr, s : Expr) -> (Int, Int) {
+  if t <= s { (t, s) } else { (s, t) }
+}
+
+fn try_unfold_proj_app(k : K, e : Expr) -> Expr? raise KernelError {
+  let f = get_app_fn(k, e)
+  if kind_of(k, f) != K_PROJ {
+    return None
+  }
+  let e2 = whnf_core(k, e)
+  if e2 != e { Some(e2) } else { None }
+}
+
+enum Reduction {
+  RContinue(Expr, Expr)
+  RUnknown(Expr, Expr)
+  RTrue
+  RFalse(Expr, Expr)
+}
+
+fn delta_step(k : K, e : Expr) -> Expr raise KernelError {
+  match unfold_definition(k, e) {
+    Some(r) => whnf_core_p(k, r, true)
+    None => kfail("internal: delta on a non-definition")
+  }
+}
+
+fn lazy_delta_cont(k : K, tn : Expr, sn : Expr) -> Reduction raise KernelError {
+  match quick_is_def_eq(k, tn, sn) {
+    LUndef => RContinue(tn, sn)
+    LTrue => RTrue
+    LFalse => RFalse(tn, sn)
+  }
+}
+
+fn lazy_delta_reduction_step(k : K, tn : Expr, sn : Expr) -> Reduction raise KernelError {
+  let dt = is_delta(k, tn)
+  let ds = is_delta(k, sn)
+  match (dt, ds) {
+    (None, None) => RUnknown(tn, sn)
+    (Some(_), None) =>
+      match try_unfold_proj_app(k, sn) {
+        Some(sn2) => lazy_delta_cont(k, tn, sn2)
+        None => lazy_delta_cont(k, delta_step(k, tn), sn)
+      }
+    (None, Some(_)) =>
+      match try_unfold_proj_app(k, tn) {
+        Some(tn2) => lazy_delta_cont(k, tn2, sn)
+        None => lazy_delta_cont(k, tn, delta_step(k, sn))
+      }
+    (Some(ct), Some(cs)) => {
+      let ht = ct.hints(k)
+      let hs = cs.hints(k)
+      if hints_lt(ht, hs) {
+        lazy_delta_cont(k, tn, delta_step(k, sn))
+      } else if hints_lt(hs, ht) {
+        lazy_delta_cont(k, delta_step(k, tn), sn)
+      } else {
+        if is_app(k, tn) && is_app(k, sn) && ct.name == cs.name && hints_is_regular(ht) &&
+          not(k.tc.failure.contains(failure_key(k, tn, sn))) {
+          if level_list_equiv(const_levels(k, get_app_fn(k, tn)), const_levels(k, get_app_fn(k, sn))) {
+            if is_def_eq_args(k, tn, sn) {
+              return RTrue
+            }
+          }
+          let fk = failure_key(k, tn, sn)
+          k.tc.failure.set(fk, true)
+          tc_log(k, C_FAILURE, fk.0, fk.1)
+        }
+        lazy_delta_cont(k, delta_step(k, tn), delta_step(k, sn))
+      }
+    }
+  }
+}
+
+fn is_nat_zero(k : K, t : Expr) -> Bool {
+  match nat_lit_value(k, t) {
+    Some(v) => v == Z
+    None => false
+  }
+}
+
+fn is_nat_succ_of(k : K, t : Expr) -> Expr? {
+  match view(k, t) {
+    VNatLit(n) => if n == Z { None } else { Some(mk_nat_lit(k, n - 1)) }
+    VApp(f, a) => if is_const_of(k, f, k.names.nat_succ) { Some(a) } else { None }
+    _ => None
+  }
+}
+
+fn is_def_eq_offset(k : K, t : Expr, s : Expr) -> LBool raise KernelError {
+  if is_nat_zero(k, t) && is_nat_zero(k, s) {
+    return LTrue
+  }
+  match (is_nat_succ_of(k, t), is_nat_succ_of(k, s)) {
+    (Some(t2), Some(s2)) => to_lbool(k, is_def_eq_core(k, t2, s2))
+    _ => LUndef
+  }
+}
+
+fn lazy_delta_reduction(k : K, tn0 : Expr, sn0 : Expr) -> Reduction raise KernelError {
+  let mut tn = tn0
+  let mut sn = sn0
+  let mut fuel = LAZY_FUEL
+  while true {
+    if fuel <= 0 {
+      kfail("deterministic timeout (lazy delta)")
+    }
+    fuel = fuel - 1
+    match is_def_eq_offset(k, tn, sn) {
+      LTrue => return RTrue
+      LFalse => return RFalse(tn, sn)
+      LUndef => ()
+    }
+    if (not(has_fvar(k, tn)) && not(has_fvar(k, sn))) || k.tc.eager {
+      match reduce_nat(k, tn) {
+        Some(t2) => return if is_def_eq_core(k, t2, sn) { RTrue } else { RFalse(t2, sn) }
+        None =>
+          match reduce_nat(k, sn) {
+            Some(s2) => return if is_def_eq_core(k, tn, s2) { RTrue } else { RFalse(tn, s2) }
+            None => ()
+          }
+      }
+    }
+    match lazy_delta_reduction_step(k, tn, sn) {
+      RContinue(t2, s2) => {
+        tn = t2
+        sn = s2
+      }
+      r => return r
+    }
+  }
+  RUnknown(tn, sn)
+}
+
+fn lazy_delta_proj_reduction(k : K, t0 : Expr, s0 : Expr, idx : Int) -> Bool raise KernelError {
+  let mut tn = t0
+  let mut sn = s0
+  let mut fuel = LAZY_FUEL
+  while true {
+    if fuel <= 0 {
+      kfail("deterministic timeout (lazy delta proj)")
+    }
+    fuel = fuel - 1
+    match lazy_delta_reduction_step(k, tn, sn) {
+      RContinue(t2, s2) => {
+        tn = t2
+        sn = s2
+      }
+      RTrue => return true
+      RUnknown(t2, s2) | RFalse(t2, s2) => {
+        tn = t2
+        sn = s2
+        break
+      }
+    }
+  }
+  match reduce_proj_core(k, idx, tn) {
+    Some(tf) =>
+      match reduce_proj_core(k, idx, sn) {
+        Some(sf) => return is_def_eq_core(k, tf, sf)
+        None => ()
+      }
+    None => ()
+  }
+  is_def_eq_core(k, tn, sn)
+}
+
+fn try_string_lit_expansion_core(k : K, t : Expr, s : Expr) -> LBool raise KernelError {
+  match view(k, t) {
+    VStrLit(str) =>
+      if is_app(k, s) && is_const_of(k, app_fn(k, s), k.names.string_of_list) {
+        to_lbool(k, is_def_eq_core(k, str_lit_to_ctor(k, str), s))
+      } else {
+        LUndef
+      }
+    _ => LUndef
+  }
+}
+
+fn try_string_lit_expansion(k : K, t : Expr, s : Expr) -> LBool raise KernelError {
+  match try_string_lit_expansion_core(k, t, s) {
+    LUndef => try_string_lit_expansion_core(k, s, t)
+    r => r
+  }
+}
+
+fn is_def_eq_unit_like(k : K, t : Expr, s : Expr) -> Bool raise KernelError {
+  let ttype = whnf(k, infer_type(k, t))
+  match const_name(k, get_app_fn(k, ttype)) {
+    Some(i) =>
+      match env_find_induct(k, i) {
+        Some(iv) =>
+          if iv.is_rec || iv.nindices != 0 {
+            false
+          } else {
+            match iv.ctors {
+              Cons(c, Nil) =>
+                match env_find_ctor(k, c) {
+                  Some(cv) => cv.nfields == 0 && is_def_eq_core(k, ttype, infer_type(k, s))
+                  None => false
+                }
+              _ => false
+            }
+          }
+        None => false
+      }
+    None => false
+  }
+}
+
+fn is_def_eq_core(k : K, t : Expr, s : Expr) -> Bool raise KernelError {
+  bump(k, ST_DEFEQ)
+  match quick_is_def_eq(k, t, s) {
+    LTrue => return true
+    LFalse => return false
+    LUndef => ()
+  }
+  if (not(has_fvar(k, t)) || k.tc.eager) && is_const_of(k, s, k.names.bool_true) {
+    if is_const_of(k, whnf(k, t), k.names.bool_true) {
+      return true
+    }
+  }
+  let tn = whnf_core_p(k, t, true)
+  let sn = whnf_core_p(k, s, true)
+  if tn != t || sn != s {
+    match quick_is_def_eq(k, tn, sn) {
+      LTrue => return true
+      LFalse => return false
+      LUndef => ()
+    }
+  }
+  match is_def_eq_proof_irrel(k, tn, sn) {
+    LTrue => return true
+    LFalse => return false
+    LUndef => ()
+  }
+  let (tn, sn) = match lazy_delta_reduction(k, tn, sn) {
+    RTrue => return true
+    RFalse(_, _) => return false
+    RContinue(a, b) => (a, b)
+    RUnknown(a, b) => (a, b)
+  }
+  match (view(k, tn), view(k, sn)) {
+    (VConst(tf, tl), VConst(sf, sl)) =>
+      if tf == sf && level_list_equiv(tl, sl) {
+        return true
+      }
+    (VFVar(a), VFVar(b)) => if a == b { return true }
+    (VProj(_, ti, te), VProj(_, si, se)) =>
+      if ti == si && lazy_delta_proj_reduction(k, te, se, ti) {
+        return true
+      }
+    _ => ()
+  }
+  let tnn = whnf_core(k, tn)
+  let snn = whnf_core(k, sn)
+  if tnn != tn || snn != sn {
+    return is_def_eq_core(k, tnn, snn)
+  }
+  if is_def_eq_app(k, tn, sn) {
+    return true
+  }
+  if try_eta_expansion(k, tn, sn) {
+    return true
+  }
+  if try_eta_struct(k, tn, sn) {
+    return true
+  }
+  match try_string_lit_expansion(k, tn, sn) {
+    LTrue => return true
+    LFalse => return false
+    LUndef => ()
+  }
+  if is_def_eq_unit_like(k, tn, sn) {
+    return true
+  }
+  false
+}
+
+// ---- quotients ---------------------------------------------------------------------------
+
+fn quot_reduce_rec(k : K, e : Expr) -> Expr? raise KernelError {
+  let f = get_app_fn(k, e)
+  let (mk_pos, arg_pos) = if is_const_of(k, f, k.names.quot_lift) {
+    (5, 3)
+  } else if is_const_of(k, f, k.names.quot_ind) {
+    (4, 3)
+  } else {
+    return None
+  }
+  let args = get_app_args(k, e)
+  if mk_pos >= args.length() {
+    return None
+  }
+  let mk = whnf(k, args[mk_pos])
+  if not(is_const_of(k, get_app_fn(k, mk), k.names.quot_mk) && get_app_num_args(k, mk) == 3) {
+    return None
+  }
+  let r = mk_app(k, args[arg_pos], app_arg(k, mk))
+  Some(mk_app_range(k, r, args, mk_pos + 1, args.length()))
+}
+
+// ---- inductive types ---------------------------------------------------------------------
+
+fn rec_major_idx(k : K, rv : RecVal) -> Int {
+  rv.nparams + rv.nmotives + rv.nminors + rv.nindices
+}
+
+fn rec_major_induct(k : K, ci : ConstInfo, rv : RecVal) -> Name {
+  // the inductive type of the major premise: the head of its type
+  let mut t = ci.type
+  for i = 0; i < rec_major_idx(k, rv); i = i + 1 {
+    t = binding_body(k, t)
+  }
+  match const_name(k, get_app_fn(k, binding_domain(k, t))) {
+    Some(n) => n
+    None => Anon
+  }
+}
+
+fn mk_nullary_ctor(k : K, type_ : Expr, nparams : Int) -> Expr? {
+  let d = get_app_fn(k, type_)
+  match view(k, d) {
+    VConst(dn, ls) =>
+      match env_find_induct(k, dn) {
+        Some(iv) =>
+          match iv.ctors {
+            Cons(c, _) => Some(mk_app_range(k, mk_const(k, c, ls), get_app_args(k, type_), 0, nparams))
+            Nil => None
+          }
+        None => None
+      }
+    _ => None
+  }
+}
+
+fn to_ctor_when_k(k : K, rv : RecVal, major_induct : Name, e : Expr) -> Expr raise KernelError {
+  let app_type = whnf(k, infer_type(k, e))
+  if not(is_const_of(k, get_app_fn(k, app_type), major_induct)) {
+    return e
+  }
+  match mk_nullary_ctor(k, app_type, rv.nparams) {
+    Some(c) => if is_def_eq(k, app_type, infer_type(k, c)) { c } else { e }
+    None => e
+  }
+}
+
+fn is_constructor_app(k : K, e : Expr) -> Bool {
+  match const_name(k, get_app_fn(k, e)) {
+    Some(n) =>
+      match env_find_ctor(k, n) {
+        Some(_) => true
+        None => false
+      }
+    None => false
+  }
+}
+
+fn expand_eta_struct(k : K, etype : Expr, e : Expr) -> Expr {
+  let i = get_app_fn(k, etype)
+  match view(k, i) {
+    VConst(iname, ls) =>
+      match env_find_induct(k, iname) {
+        Some({ ctors: Cons(c, _), .. }) =>
+          match env_find_ctor(k, c) {
+            Some(cv) => {
+              let mut r = mk_app_range(k, mk_const(k, c, ls), get_app_args(k, etype), 0, cv.nparams)
+              for j = 0; j < cv.nfields; j = j + 1 {
+                r = mk_app(k, r, mk_proj(k, iname, j, e))
+              }
+              r
+            }
+            None => e
+          }
+        _ => e
+      }
+    _ => e
+  }
+}
+
+fn to_ctor_when_struct(k : K, induct : Name, e : Expr) -> Expr raise KernelError {
+  if not(is_structure_like(k, induct)) || is_constructor_app(k, e) {
+    return e
+  }
+  match env_find_induct(k, induct) {
+    Some(iv) => if iv.is_rec { return e }
+    None => return e
+  }
+  let etype = whnf(k, infer_type(k, e))
+  if not(is_const_of(k, get_app_fn(k, etype), induct)) {
+    return e
+  }
+  let s = whnf(k, infer_type(k, etype))
+  if not(sort_level(k, s).is_never_zero()) {
+    return e
+  }
+  expand_eta_struct(k, etype, e)
+}
+
+fn get_rec_rule(k : K, rv : RecVal, major : Expr) -> RecRule? {
+  match const_name(k, get_app_fn(k, major)) {
+    Some(fname) => {
+      let mut cur = rv.rules
+      while cur is Cons(r, rest) {
+        if r.ctor == fname {
+          return Some(r)
+        }
+        cur = rest
+      }
+      None
+    }
+    None => None
+  }
+}
+
+fn inductive_reduce_rec(k : K, e : Expr) -> Expr? raise KernelError {
+  let f = get_app_fn(k, e)
+  let (rname, ls) = match view(k, f) {
+    VConst(n, ls) => (n, ls)
+    _ => return None
+  }
+  let ci = match env_find(k, rname) {
+    Some(ci) => ci
+    None => return None
+  }
+  let rv = match ci.kind {
+    CRec(rv) => rv
+    _ => return None
+  }
+  let rec_args = get_app_args(k, e)
+  let major_idx = rec_major_idx(k, rv)
+  if major_idx >= rec_args.length() {
+    return None
+  }
+  let major_induct = rec_major_induct(k, ci, rv)
+  let mut major = rec_args[major_idx]
+  if rv.k {
+    major = to_ctor_when_k(k, rv, major_induct, major)
+  }
+  let mw = whnf(k, major)
+  major = match view(k, mw) {
+    VNatLit(n) => nat_lit_to_ctor(k, n)
+    VStrLit(s) => whnf(k, str_lit_to_ctor(k, s))
+    _ => to_ctor_when_struct(k, major_induct, mw)
+  }
+  let rule = match get_rec_rule(k, rv, major) {
+    Some(r) => r
+    None => return None
+  }
+  let major_args = get_app_args(k, major)
+  if rule.nfields > major_args.length() {
+    return None
+  }
+  if list_length(ls) != ci.num_lparams(k) {
+    return None
+  }
+  let mut rhs = match k.tc.rule_c.get((f, rule.rhs)) {
+    Some(r) => r
+    None => {
+      let r = instantiate_lparams(k, rule.rhs, ci.lparams, ls)
+      k.tc.rule_c.set((f, rule.rhs), r)
+      tc_log(k, C_RULE, f, rule.rhs)
+      r
+    }
+  }
+  rhs = mk_app_range(k, rhs, rec_args, 0, rv.nparams + rv.nmotives + rv.nminors)
+  rhs = mk_app_range(k, rhs, major_args, major_args.length() - rule.nfields, major_args.length())
+  bump(k, ST_IOTA)
+  if major_idx + 1 < rec_args.length() {
+    rhs = mk_app_range(k, rhs, rec_args, major_idx + 1, rec_args.length())
+  }
+  Some(rhs)
+}

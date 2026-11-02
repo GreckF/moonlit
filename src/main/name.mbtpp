@@ -1,0 +1,66 @@
+// Hierarchical names, with the hash cached in each node.
+
+enum Name {
+  Anon
+  NStr(Name, String, Int)
+  NNum(Name, String, Int)
+}
+
+fn Name::hash_of(self : Name) -> Int {
+  match self {
+    Anon => 1723
+    NStr(_, _, h) => h
+    NNum(_, _, h) => h
+  }
+}
+
+fn mk_name_str(p : Name, s : String) -> Name {
+  NStr(p, s, combine_hash(p.hash_of(), s.hash()))
+}
+
+// numeric components are kept as text: they may exceed 32 bits
+fn mk_name_num(p : Name, i : String) -> Name {
+  NNum(p, i, combine_hash(p.hash_of(), i.hash() + 17))
+}
+
+fn name_of_string(s : String) -> Name {
+  let mut n = Anon
+  let mut start = 0
+  for i = 0; i <= s.length(); i = i + 1 {
+    if i == s.length() || s[i] == '.' {
+      n = mk_name_str(n, s.substring(start, i))
+      start = i + 1
+    }
+  }
+  n
+}
+
+fn Name::name_eq(self : Name, other : Name) -> Bool {
+  match (self, other) {
+    (Anon, Anon) => true
+    (NStr(p1, s1, h1), NStr(p2, s2, h2)) => h1 == h2 && s1 == s2 && p1.name_eq(p2)
+    (NNum(p1, i1, h1), NNum(p2, i2, h2)) => h1 == h2 && i1 == i2 && p1.name_eq(p2)
+    _ => false
+  }
+}
+
+impl Eq for Name with op_equal(a, b) { a.name_eq(b) }
+
+impl Hash for Name with hash(self) { self.hash_of() }
+
+impl Show for Name with to_string(self) {
+  match self {
+    Anon => "[anonymous]"
+    NStr(Anon, s, _) => s
+    NNum(Anon, i, _) => i
+    NStr(p, s, _) => p.to_string() + "." + s
+    NNum(p, i, _) => p.to_string() + "." + i
+  }
+}
+
+fn Name::is_anon(self : Name) -> Bool {
+  match self {
+    Anon => true
+    _ => false
+  }
+}

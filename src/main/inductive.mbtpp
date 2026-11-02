@@ -1,0 +1,1091 @@
+// Adding inductive types: checking the types and constructors, generating the
+// recursors, and eliminating nested occurrences. A port of lean4lean's
+// `Inductive/Add.lean`.
+
+struct CtorDecl {
+  name : Name
+  type : Expr
+}
+
+struct IndDecl {
+  name : Name
+  type : Expr
+  ctors : Array[CtorDecl]
+}
+
+fn name_append_index(k : K, n : Name, i : Int) -> Name {
+  match n {
+    NStr(p, s, _) => mk_name_str(p, s + "_" + i.to_string())
+    _ => mk_name_num(n, i.to_string())
+  }
+}
+
+fn name_append_after(k : K, n : Name, suffix : String) -> Name {
+  match n {
+    NStr(p, s, _) => mk_name_str(p, s + suffix)
+    _ => mk_name_str(n, suffix)
+  }
+}
+
+fn name_append(k : K, p : Name, n : Name) -> Name {
+  match n {
+    Anon => p
+    NStr(q, s, _) => mk_name_str(name_append(k, p, q), s)
+    NNum(q, i, _) => mk_name_num(name_append(k, p, q), i)
+  }
+}
+
+fn name_is_prefix_of(k : K, p : Name, n : Name) -> Bool {
+  if p == n {
+    return true
+  }
+  match n {
+    Anon => false
+    NStr(q, _, _) | NNum(q, _, _) => name_is_prefix_of(k, p, q)
+  }
+}
+
+// `n` with the prefix `p` replaced by `q`.
+fn name_replace_prefix(k : K, n : Name, p : Name, q : Name) -> Name {
+  if n == p {
+    return q
+  }
+  match n {
+    Anon => Anon
+    NStr(r, s, _) => mk_name_str(name_replace_prefix(k, r, p, q), s)
+    NNum(r, i, _) => mk_name_num(name_replace_prefix(k, r, p, q), i)
+  }
+}
+
+fn mk_rec_name(k : K, n : Name) -> Name {
+  mk_name_str(n, "rec")
+}
+
+
+
+
+
+fn consume_type_annotations(k : K, e : Expr) -> Expr {
+  let f = get_app_fn(k, e)
+  let n = get_app_num_args(k, e)
+  if (is_const_of(k, f, k.names.opt_param) || is_const_of(k, f, k.names.auto_param)) && n == 2 {
+    consume_type_annotations(k, app_arg(k, app_fn(k, e)))
+  } else if (is_const_of(k, f, k.names.out_param) || is_const_of(k, f, k.names.semi_out_param)) && n == 1 {
+    consume_type_annotations(k, app_arg(k, e))
+  } else {
+    e
+  }
+}
+
+fn local_decl_of(k : K, name : Name, t : Expr) -> Expr {
+  mk_local_decl(k, name, consume_type_annotations(k, t))
+}
+
+fn fvar_type(k : K, x : Expr) -> Expr {
+  local_type(k, fvar_id(k, x))
+}
+
+fn fvar_name(k : K, x : Expr) -> Name {
+  k.lctx.decls[fvar_id(k, x)].name
+}
+
+fn check_dup_lparams(k : K, ps : List[Name]) -> Unit raise KernelError {
+  match ps {
+    Nil => ()
+    Cons(p, rest) => {
+      if name_mem(p, rest) {
+        kfail("duplicate universe level parameter '\{p}'")
+      }
+      check_dup_lparams(k, rest)
+    }
+  }
+}
+
+fn array_contains(k : K, xs : Array[Expr], x : Expr) -> Bool {
+  for y in xs {
+    if y == x {
+      return true
+    }
+  }
+  false
+}
+
+// ---- adding the types --------------------------------------------------------------
+
+struct AddInd {
+  lparams : List[Name]
+  levels : List[Level]
+  types : Array[IndDecl]
+  nnested : Int
+  is_unsafe : Bool
+  params : Array[Expr]
+  nindices : Array[Int]
+  ind_consts : Array[Expr]
+  mut result_level : Level
+  mut is_not_zero : Bool
+}
+
+fn AddInd::has_ind_occ(self : AddInd, k : K, t : Expr) -> Bool {
+  let cs = self.ind_consts
+  match find_const(k, t, n => {
+    let mut found = false
+    for c in cs {
+      if is_const_of(k, c, n) {
+        found = true
+      }
+    }
+    found
+  }) {
+    Some(_) => true
+    None => false
+  }
+}
+
+fn AddInd::check_inductive_types(self : AddInd, k : K, nparams : Int) -> Unit raise KernelError {
+  for idx = 0; idx < self.types.length(); idx = idx + 1 {
+    let it = self.types[idx]
+    ignore(check_type(k, it.type))
+    let mut t = whnf(k, it.type)
+    let mut i = 0
+    let mut ni = 0
+    while is_pi(k, t) {
+      let dom = binding_domain(k, t)
+      let body = binding_body(k, t)
+      if i < nparams {
+        if idx == 0 {
+          let p = local_decl_of(k, binding_name(k, t), dom)
+          self.params.push(p)
+          t = instantiate1(k, body, p)
+        } else {
+          let p = self.params[i]
+          if not(is_def_eq(k, dom, fvar_type(k, p))) {
+            kfail("parameters of all inductive datatypes must match")
+          }
+          t = instantiate1(k, body, p)
+        }
+        t = whnf(k, t)
+        i = i + 1
+      } else {
+        let a = local_decl_of(k, binding_name(k, t), dom)
+        t = whnf(k, instantiate1(k, body, a))
+        ni = ni + 1
+      }
+    }
+    if i != nparams {
+      kfail("number of parameters mismatch in inductive datatype declaration")
+    }
+    let s = ensure_sort_core(k, t, t)
+    let lvl = sort_level(k, s)
+    if idx == 0 {
+      self.result_level = lvl
+      self.is_not_zero = lvl.is_never_zero()
+    } else if not(level_equiv(lvl, self.result_level)) {
+      kfail("mutually inductive types must live in the same universe")
+    }
+    self.nindices.push(ni)
+    self.ind_consts.push(mk_const(k, it.name, self.levels))
+  }
+}
+
+fn AddInd::is_rec(self : AddInd, k : K) -> Bool {
+  for it in self.types {
+    for c in it.ctors {
+      let mut t = c.type
+      while is_pi(k, t) {
+        if self.has_ind_occ(k, binding_domain(k, t)) {
+          return true
+        }
+        t = binding_body(k, t)
+      }
+    }
+  }
+  false
+}
+
+fn AddInd::is_reflexive(self : AddInd, k : K) -> Bool {
+  for it in self.types {
+    for c in it.ctors {
+      let mut t = c.type
+      while is_pi(k, t) {
+        let d = binding_domain(k, t)
+        if is_pi(k, d) && self.has_ind_occ(k, d) {
+          return true
+        }
+        t = binding_body(k, t)
+      }
+    }
+  }
+  false
+}
+
+fn AddInd::all_names(self : AddInd, k : K) -> List[Name] {
+  let ns : Array[Name] = Array::new()
+  for it in self.types {
+    ns.push(it.name)
+  }
+  list_of_array(ns)
+}
+
+fn AddInd::declare_inductive_types(self : AddInd, k : K, nparams : Int) -> Unit raise KernelError {
+  let all = self.all_names(k)
+  let is_rec = self.is_rec(k)
+  let is_refl = self.is_reflexive(k)
+  for idx = 0; idx < self.types.length(); idx = idx + 1 {
+    let it = self.types[idx]
+    env_check_name(k, it.name)
+    let cnames : Array[Name] = Array::new()
+    for c in it.ctors {
+      cnames.push(c.name)
+    }
+    env_add(k, {
+      name: it.name,
+      lparams: self.lparams,
+      type: it.type,
+      kind: CInduct({
+        nparams,
+        nindices: self.nindices[idx],
+        all,
+        ctors: list_of_array(cnames),
+        nnested: self.nnested,
+        is_rec,
+        is_unsafe: self.is_unsafe,
+        is_reflexive: is_refl,
+      }),
+    })
+  }
+}
+
+fn AddInd::is_valid_ind_app_idx(self : AddInd, k : K, t : Expr, i : Int) -> Bool {
+  let f = get_app_fn(k, t)
+  if f != self.ind_consts[i] {
+    return false
+  }
+  let args = get_app_args(k, t)
+  if args.length() != self.params.length() + self.nindices[i] {
+    return false
+  }
+  for j = 0; j < self.params.length(); j = j + 1 {
+    if self.params[j] != args[j] {
+      return false
+    }
+  }
+  for j = self.params.length(); j < args.length(); j = j + 1 {
+    if self.has_ind_occ(k, args[j]) {
+      return false
+    }
+  }
+  true
+}
+
+fn AddInd::is_valid_ind_app(self : AddInd, k : K, t : Expr) -> Int {
+  for i = 0; i < self.ind_consts.length(); i = i + 1 {
+    if self.is_valid_ind_app_idx(k, t, i) {
+      return i
+    }
+  }
+  -1
+}
+
+fn AddInd::is_rec_arg(self : AddInd, k : K, t0 : Expr) -> Int raise KernelError {
+  let mut t = whnf(k, t0)
+  while is_pi(k, t) {
+    let a = local_decl_of(k, binding_name(k, t), binding_domain(k, t))
+    t = whnf(k, instantiate1(k, binding_body(k, t), a))
+  }
+  self.is_valid_ind_app(k, t)
+}
+
+fn AddInd::check_positivity(self : AddInd, k : K, t0 : Expr, ctor : Name, idx : Int) -> Unit raise KernelError {
+  let mut t = whnf(k, t0)
+  while true {
+    if not(self.has_ind_occ(k, t)) {
+      return
+    }
+    if is_pi(k, t) {
+      if self.has_ind_occ(k, binding_domain(k, t)) {
+        kfail("arg #\{idx + 1} of '\{ctor}' has a non positive occurrence of the datatypes being declared")
+      }
+      let a = local_decl_of(k, binding_name(k, t), binding_domain(k, t))
+      t = whnf(k, instantiate1(k, binding_body(k, t), a))
+    } else {
+      if self.is_valid_ind_app(k, t) < 0 {
+        kfail("arg #\{idx + 1} of '\{ctor}' has a non valid occurrence of the datatypes being declared")
+      }
+      return
+    }
+  }
+}
+
+fn AddInd::check_constructors(self : AddInd, k : K) -> Unit raise KernelError {
+  for idx = 0; idx < self.types.length(); idx = idx + 1 {
+    let it = self.types[idx]
+    let seen : HashMap[Name, Bool] = HashMap::new()
+    for c in it.ctors {
+      if seen.contains(c.name) {
+        kfail("duplicate constructor name '\{c.name}'")
+      }
+      seen.set(c.name, true)
+      ignore(check_type(k, c.type))
+      let mut t = c.type
+      let mut i = 0
+      while is_pi(k, t) {
+        let dom = binding_domain(k, t)
+        if i < self.params.length() {
+          let p = self.params[i]
+          if not(is_def_eq(k, dom, fvar_type(k, p))) {
+            kfail("arg #\{i + 1} of '\{c.name}' does not match inductive datatype parameters")
+          }
+          t = instantiate1(k, binding_body(k, t), p)
+        } else {
+          let s = ensure_sort_core(k, infer_type(k, dom), dom)
+          if not(self.result_level.is_always_zero() || level_leq(sort_level(k, s), self.result_level)) {
+            kfail("universe level of type_of(arg #\{i + 1}) of '\{c.name}' is too big for the corresponding inductive datatype")
+          }
+          if not(self.is_unsafe) {
+            self.check_positivity(k, dom, c.name, i)
+          }
+          let a = local_decl_of(k, binding_name(k, t), dom)
+          t = instantiate1(k, binding_body(k, t), a)
+        }
+        i = i + 1
+      }
+      if not(self.is_valid_ind_app_idx(k, t, idx)) {
+        kfail("invalid return type for '\{c.name}'")
+      }
+    }
+  }
+}
+
+fn AddInd::declare_constructors(self : AddInd, k : K) -> Unit raise KernelError {
+  for it in self.types {
+    let mut cidx = 0
+    for c in it.ctors {
+      let mut arity = 0
+      let mut t = c.type
+      while is_pi(k, t) {
+        arity = arity + 1
+        t = binding_body(k, t)
+      }
+      env_check_name(k, c.name)
+      env_add(k, {
+        name: c.name,
+        lparams: self.lparams,
+        type: c.type,
+        kind: CCtor({
+          induct: it.name,
+          cidx,
+          nparams: self.params.length(),
+          nfields: arity - self.params.length(),
+          is_unsafe: self.is_unsafe,
+        }),
+      })
+      cidx = cidx + 1
+    }
+  }
+}
+
+fn AddInd::is_large_eliminator(self : AddInd, k : K) -> Bool raise KernelError {
+  if self.is_not_zero {
+    return true
+  }
+  if self.types.length() != 1 {
+    return false
+  }
+  let ctors = self.types[0].ctors
+  if ctors.length() == 0 {
+    return true
+  }
+  if ctors.length() > 1 {
+    return false
+  }
+  let mut t = ctors[0].type
+  let mut i = 0
+  let to_check : Array[Expr] = Array::new()
+  while is_pi(k, t) {
+    let dom = binding_domain(k, t)
+    let a = local_decl_of(k, binding_name(k, t), dom)
+    if i >= self.params.length() {
+      if not(sort_level(k, ensure_sort_core(k, infer_type(k, dom), dom)).is_always_zero()) {
+        to_check.push(a)
+      }
+    }
+    t = instantiate1(k, binding_body(k, t), a)
+    i = i + 1
+  }
+  let args = get_app_args(k, t)
+  for x in to_check {
+    if not(array_contains(k, args, x)) {
+      return false
+    }
+  }
+  true
+}
+
+fn AddInd::get_elim_level(self : AddInd, k : K) -> Level raise KernelError {
+  if not(self.is_large_eliminator(k)) {
+    return Zero
+  }
+  let u = name_of_string("u")
+  if not(name_mem(u, self.lparams)) {
+    return Param(u)
+  }
+  let mut i = 1
+  while true {
+    let n = name_append_index(k, u, i)
+    if not(name_mem(n, self.lparams)) {
+      return Param(n)
+    }
+    i = i + 1
+  }
+  Zero
+}
+
+fn AddInd::is_k_target(self : AddInd, k : K) -> Bool {
+  if self.types.length() != 1 || not(self.result_level.is_always_zero()) {
+    return false
+  }
+  let ctors = self.types[0].ctors
+  if ctors.length() != 1 {
+    return false
+  }
+  let mut t = ctors[0].type
+  let mut i = 0
+  while is_pi(k, t) {
+    if i >= self.params.length() {
+      return false
+    }
+    t = binding_body(k, t)
+    i = i + 1
+  }
+  true
+}
+
+// the index of the inductive type of `t` and its indices
+fn AddInd::get_i_indices(self : AddInd, k : K, t : Expr) -> (Int, Array[Expr]) raise KernelError {
+  let i = self.is_valid_ind_app(k, t)
+  if i < 0 {
+    kfail("internal: not an inductive application")
+  }
+  let args = get_app_args(k, t)
+  (i, args.slice(self.params.length(), args.length()))
+}
+
+struct RecInfo {
+  motive : Expr
+  minors : Array[Expr]
+  indices : Array[Expr]
+  major : Expr
+}
+
+// the fields `bu` of a constructor, those `u` of them that are recursive, and its result type
+fn AddInd::ctor_args(self : AddInd, k : K, ctype : Expr) -> (Expr, Array[Expr], Array[Expr]) raise KernelError {
+  let bu : Array[Expr] = Array::new()
+  let u : Array[Expr] = Array::new()
+  let mut t = ctype
+  let mut i = 0
+  while is_pi(k, t) {
+    if i < self.params.length() {
+      t = instantiate1(k, binding_body(k, t), self.params[i])
+    } else {
+      let dom = binding_domain(k, t)
+      let a = local_decl_of(k, binding_name(k, t), dom)
+      bu.push(a)
+      if self.is_rec_arg(k, dom) >= 0 {
+        u.push(a)
+      }
+      t = instantiate1(k, binding_body(k, t), a)
+    }
+    i = i + 1
+  }
+  (t, bu, u)
+}
+
+// the type of a recursive field, as `(xs) -> I params indices`
+fn u_args(k : K, ui : Expr) -> (Expr, Array[Expr]) raise KernelError {
+  let xs : Array[Expr] = Array::new()
+  let mut t = whnf(k, infer_type(k, ui))
+  while is_pi(k, t) {
+    let a = local_decl_of(k, binding_name(k, t), binding_domain(k, t))
+    xs.push(a)
+    t = whnf(k, instantiate1(k, binding_body(k, t), a))
+  }
+  (t, xs)
+}
+
+fn AddInd::mk_rec_infos(self : AddInd, k : K, elim_level : Level) -> Array[RecInfo] raise KernelError {
+  let infos : Array[RecInfo] = Array::new()
+  for d = 0; d < self.types.length(); d = d + 1 {
+    let indices : Array[Expr] = Array::new()
+    let mut t = whnf(k, self.types[d].type)
+    let mut i = 0
+    while is_pi(k, t) {
+      if i < self.params.length() {
+        t = whnf(k, instantiate1(k, binding_body(k, t), self.params[i]))
+        i = i + 1
+      } else {
+        let a = local_decl_of(k, binding_name(k, t), binding_domain(k, t))
+        indices.push(a)
+        t = whnf(k, instantiate1(k, binding_body(k, t), a))
+      }
+    }
+    let t_ty = mk_app_n(k, mk_app_n(k, self.ind_consts[d], self.params), indices)
+    let major = local_decl_of(k, name_of_string("t"), t_ty)
+    let motive_ty = mk_pi_fvars(k, indices, mk_pi_fvars(k, [major], mk_sort(k, elim_level)))
+    let mname = if self.types.length() > 1 {
+      name_append_index(k, name_of_string("motive"), d + 1)
+    } else {
+      name_of_string("motive")
+    }
+    let motive = local_decl_of(k, mname, motive_ty)
+    infos.push({ motive, minors: Array::new(), indices, major })
+  }
+  for d = 0; d < self.types.length(); d = d + 1 {
+    let it = self.types[d]
+    for c in it.ctors {
+      let (t, bu, u) = self.ctor_args(k, c.type)
+      let (it_idx, it_indices) = self.get_i_indices(k, t)
+      let intro = mk_app_n(k, mk_app_n(k, mk_const(k, c.name, self.levels), self.params), bu)
+      let motive_app = mk_app(k, mk_app_n(k, infos[it_idx].motive, it_indices), intro)
+      let v : Array[Expr] = Array::new()
+      for ui in u {
+        let (ui_ty, xs) = u_args(k, ui)
+        let (j, j_indices) = self.get_i_indices(k, ui_ty)
+        let vi_ty = mk_pi_fvars(k, xs, mk_app(k, mk_app_n(k, infos[j].motive, j_indices), mk_app_n(k, ui, xs)))
+        v.push(local_decl_of(k, name_append_after(k, fvar_name(k, ui), "_ih"), vi_ty))
+      }
+      let minor_ty = mk_pi_fvars(k, bu, mk_pi_fvars(k, v, motive_app))
+      let minor = local_decl_of(k, name_replace_prefix(k, c.name, it.name, Anon), minor_ty)
+      infos[d].minors.push(minor)
+    }
+  }
+  infos
+}
+
+fn AddInd::declare_recursors(self : AddInd, k : K, elim_level : Level, is_k : Bool) -> Unit raise KernelError {
+  let infos = self.mk_rec_infos(k, elim_level)
+  let motives : Array[Expr] = Array::new()
+  let minors : Array[Expr] = Array::new()
+  for info in infos {
+    motives.push(info.motive)
+    for m in info.minors {
+      minors.push(m)
+    }
+  }
+  let (rec_lparams, rec_levels) = match elim_level {
+    Param(u) => (Cons(u, self.lparams), Cons(elim_level, self.levels))
+    _ => (self.lparams, self.levels)
+  }
+  let all = self.all_names(k)
+  let mut minor_idx = 0
+  for d = 0; d < self.types.length(); d = d + 1 {
+    let it = self.types[d]
+    let info = infos[d]
+    let ty = mk_pi_fvars(k, 
+      self.params,
+      mk_pi_fvars(k, 
+        motives,
+        mk_pi_fvars(k, 
+          minors,
+          mk_pi_fvars(k, 
+            info.indices,
+            mk_pi_fvars(k, [info.major], mk_app(k, mk_app_n(k, info.motive, info.indices), info.major)),
+          ),
+        ),
+      ),
+    )
+    let rules : Array[RecRule] = Array::new()
+    for c in it.ctors {
+      let (_, bu, u) = self.ctor_args(k, c.type)
+      let v : Array[Expr] = Array::new()
+      for ui in u {
+        let (ui_ty, xs) = u_args(k, ui)
+        let (j, j_indices) = self.get_i_indices(k, ui_ty)
+        let mut val = mk_const(k, mk_rec_name(k, self.types[j].name), rec_levels)
+        val = mk_app_n(k, mk_app_n(k, mk_app_n(k, mk_app_n(k, val, self.params), motives), minors), j_indices)
+        v.push(mk_lambda_fvars(k, xs, mk_app(k, val, mk_app_n(k, ui, xs))))
+      }
+      let rhs = mk_lambda_fvars(k, 
+        self.params,
+        mk_lambda_fvars(k, 
+          motives,
+          mk_lambda_fvars(k, minors, mk_lambda_fvars(k, bu, mk_app_n(k, mk_app_n(k, minors[minor_idx], bu), v))),
+        ),
+      )
+      rules.push({ ctor: c.name, nfields: bu.length(), rhs })
+      minor_idx = minor_idx + 1
+    }
+    let rname = mk_rec_name(k, it.name)
+    env_check_name(k, rname)
+    env_add(k, {
+      name: rname,
+      lparams: rec_lparams,
+      type: ty,
+      kind: CRec({
+        all,
+        nparams: self.params.length(),
+        nindices: self.nindices[d],
+        nmotives: motives.length(),
+        nminors: minors.length(),
+        rules: list_of_array(rules),
+        k: is_k,
+        is_unsafe: self.is_unsafe,
+      }),
+    })
+  }
+}
+
+fn add_inductive_core(
+  k : K,
+  lparams : List[Name],
+  nparams : Int,
+  types : Array[IndDecl],
+  nnested : Int,
+  is_unsafe : Bool,
+) -> Unit raise KernelError {
+  check_dup_lparams(k, lparams)
+  tc_reset(k, lparams, if is_unsafe { UnsafeDecl } else { SafeDecl })
+  let st : AddInd = {
+    lparams,
+    levels: lparams.map(n => Param(n)),
+    types,
+    nnested,
+    is_unsafe,
+    params: Array::new(),
+    nindices: Array::new(),
+    ind_consts: Array::new(),
+    result_level: Zero,
+    is_not_zero: false,
+  }
+  st.check_inductive_types(k, nparams)
+  st.declare_inductive_types(k, nparams)
+  st.check_constructors(k)
+  st.declare_constructors(k)
+  let elim_level = st.get_elim_level(k)
+  let is_k = st.is_k_target(k)
+  st.declare_recursors(k, elim_level, is_k)
+}
+
+// ---- nested inductive types ------------------------------------------------------------
+
+struct ElimNested {
+  lparams : List[Name]
+  lvls : List[Level]
+  params : Array[Expr]
+  // the nested occurrences `J As` (over `params`) and their auxiliary types
+  nested_aux : Array[(Expr, Name)]
+  new_types : Array[IndDecl]
+  mut next_idx : Int
+}
+
+fn ElimNested::mk_unique_name(self : ElimNested, k : K, n : Name) -> Name {
+  let mut i = self.next_idx
+  while true {
+    let r = name_append_index(k, n, i)
+    if not(env_contains(k, r)) {
+      self.next_idx = i + 1
+      return r
+    }
+    i = i + 1
+  }
+  n
+}
+
+// `e` with its first `n` binders instantiated by `params` (left to right)
+fn instantiate_forall_params(k : K, e : Expr, n : Int, args : Array[Expr]) -> Expr raise KernelError {
+  let mut t = e
+  for i = 0; i < n; i = i + 1 {
+    if not(is_pi(k, t)) {
+      kfail("invalid nested inductive datatype, ill-formed declaration")
+    }
+    t = binding_body(k, t)
+  }
+  instantiate_rev(k, t, args.slice(0, n))
+}
+
+fn replace_params(k : K, params : Array[Expr], e : Expr, as_ : Array[Expr]) -> Expr {
+  let ids : Array[Int] = Array::new()
+  for a in as_ {
+    ids.push(fvar_id(k, a))
+  }
+  instantiate_rev(k, abstract_fvars(k, e, ids), params)
+}
+
+fn ElimNested::is_new_type_const(self : ElimNested, k : K, n : Name) -> Bool {
+  for t in self.new_types {
+    if t.name == n {
+      return true
+    }
+  }
+  false
+}
+
+fn ElimNested::is_nested_inductive_app(self : ElimNested, k : K, e : Expr) -> (ConstInfo, InductVal)? raise KernelError {
+  if not(is_app(k, e)) {
+    return None
+  }
+  let fname = match const_name(k, get_app_fn(k, e)) {
+    Some(n) => n
+    None => return None
+  }
+  let ci = match env_find(k, fname) {
+    Some(ci) => ci
+    None => return None
+  }
+  let iv = match ci.kind {
+    CInduct(iv) => iv
+    _ => return None
+  }
+  let args = get_app_args(k, e)
+  if iv.nparams > args.length() {
+    return None
+  }
+  let mut is_nested = false
+  let mut loose = false
+  for i = 0; i < iv.nparams; i = i + 1 {
+    if has_loose_bvars(k, args[i]) {
+      loose = true
+    }
+    match find_const(k, args[i], n => self.is_new_type_const(k, n)) {
+      Some(_) => is_nested = true
+      None => ()
+    }
+  }
+  if not(is_nested) {
+    return None
+  }
+  if loose {
+    kfail("invalid nested inductive datatype '\{fname}', nested inductive datatypes parameters cannot contain local variables.")
+  }
+  Some((ci, iv))
+}
+
+fn ElimNested::replace_if_nested(self : ElimNested, k : K, as_ : Array[Expr], e : Expr) -> Expr? raise KernelError {
+  let (_, ival) = match self.is_nested_inductive_app(k, e) {
+    Some(r) => r
+    None => return None
+  }
+  let f = get_app_fn(k, e)
+  let args = get_app_args(k, e)
+  let i_lvls = const_levels(k, f)
+  let i_name = match const_name(k, f) {
+    Some(n) => n
+    None => return None
+  }
+  let np = ival.nparams
+  let i_as = mk_app_range(k, f, args, 0, np)
+  let i_params = replace_params(k, self.params, i_as, as_)
+  for p in self.nested_aux {
+    if p._0 == i_params {
+      return Some(mk_app_range(k, mk_app_n(k, mk_const(k, p._1, self.lvls), as_), args, np, args.length()))
+    }
+  }
+  let mut result : Expr? = None
+  let mut cur = ival.all
+  while cur is Cons(j_name, rest) {
+    cur = rest
+    let j_ci = env_get(k, j_name)
+    let j_info = match j_ci.kind {
+      CInduct(v) => v
+      _ => kfail("internal: nested type is not inductive")
+    }
+    let j = mk_const(k, j_name, i_lvls)
+    let j_as = mk_app_range(k, j, args, 0, np)
+    let aux_j_name = self.mk_unique_name(k, name_append(k, name_of_string("_nested"), j_name))
+    let aux_j_type0 = instantiate_lparams(k, j_ci.type, j_ci.lparams, i_lvls)
+    let aux_j_type = mk_pi_fvars(k, as_, instantiate_forall_params(k, aux_j_type0, np, args))
+    let j_as2 = replace_params(k, self.params, j_as, as_)
+    self.nested_aux.push((j_as2, aux_j_name))
+    if j_name == i_name {
+      result = Some(mk_app_range(k, mk_app_n(k, mk_const(k, aux_j_name, self.lvls), as_), args, np, args.length()))
+    }
+    let aux_ctors : Array[CtorDecl] = Array::new()
+    let mut cc = j_info.ctors
+    while cc is Cons(jc_name, crest) {
+      cc = crest
+      let jc = env_get(k, jc_name)
+      let aux_c_name = name_replace_prefix(k, jc_name, j_name, aux_j_name)
+      let aux_c_type0 = instantiate_lparams(k, jc.type, jc.lparams, i_lvls)
+      let aux_c_type = mk_pi_fvars(k, as_, instantiate_forall_params(k, aux_c_type0, np, args))
+      aux_ctors.push({ name: aux_c_name, type: aux_c_type })
+    }
+    self.new_types.push({ name: aux_j_name, type: aux_j_type, ctors: aux_ctors })
+  }
+  match result {
+    Some(_) => result
+    None => kfail("internal: nested occurrence not found")
+  }
+}
+
+// Replace subterms top-down: where `f` gives a result, it is final.
+fn replace_expr(k : K, e : Expr, f : (Expr) -> Expr? raise KernelError) -> Expr raise KernelError {
+  re_go(k, e, f, HashMap::new())
+}
+
+fn re_go(k : K, e : Expr, f : (Expr) -> Expr? raise KernelError, m : HashMap[Int, Expr]) -> Expr raise KernelError {
+  match m.get(e) {
+    Some(r) => return r
+    None => ()
+  }
+  let r = match f(e) {
+    Some(r) => r
+    None =>
+      match view(k, e) {
+        VApp(a, b) => mk_app(k, re_go(k, a, f, m), re_go(k, b, f, m))
+        VLam(n, t, b, bi) => mk_lam(k, n, re_go(k, t, f, m), re_go(k, b, f, m), bi)
+        VPi(n, t, b, bi) => mk_pi(k, n, re_go(k, t, f, m), re_go(k, b, f, m), bi)
+        VLet(n, t, v, b) => mk_let(k, n, re_go(k, t, f, m), re_go(k, v, f, m), re_go(k, b, f, m))
+        VProj(s, i, x) => mk_proj(k, s, i, re_go(k, x, f, m))
+        _ => e
+      }
+  }
+  m.set(e, r)
+  r
+}
+
+// Open the first `n` binders of `t` with new free variables.
+fn with_params(k : K, t0 : Expr, n : Int) -> (Expr, Array[Expr]) raise KernelError {
+  let xs : Array[Expr] = Array::new()
+  let mut t = t0
+  for i = 0; i < n; i = i + 1 {
+    if not(is_pi(k, t)) {
+      kfail("invalid inductive datatype declaration, incorrect number of parameters")
+    }
+    let x = mk_local_decl(k, binding_name(k, t), binding_domain(k, t))
+    xs.push(x)
+    t = instantiate1(k, binding_body(k, t), x)
+  }
+  (t, xs)
+}
+
+fn ElimNested::run(self : ElimNested, k : K, nparams : Int) -> Unit raise KernelError {
+  let mut i = 0
+  while i < self.new_types.length() {
+    let it = self.new_types[i]
+    let ctors : Array[CtorDecl] = Array::new()
+    for c in it.ctors {
+      let (ct, as_) = with_params(k, c.type, nparams)
+      let ct2 = replace_expr(k, ct, e => self.replace_if_nested(k, as_, e))
+      ctors.push({ name: c.name, type: mk_pi_fvars(k, as_, ct2) })
+    }
+    self.new_types[i] = { name: it.name, type: it.type, ctors }
+    i = i + 1
+  }
+}
+
+fn ElimNested::aux_of(self : ElimNested, k : K, n : Name) -> Expr? {
+  for p in self.nested_aux {
+    if p._1 == n {
+      return Some(p._0)
+    }
+  }
+  None
+}
+
+// the nested occurrence an auxiliary constructor belongs to, and its auxiliary type
+fn ElimNested::nested_if_aux_ctor(self : ElimNested, k : K, c : Name) -> (Expr, Name)? {
+  match env_find_ctor(k, c) {
+    Some(cv) =>
+      match self.aux_of(k, cv.induct) {
+        Some(e) => Some((e, cv.induct))
+        None => None
+      }
+    None => None
+  }
+}
+
+fn ElimNested::restore_ctor_name(self : ElimNested, k : K, c : Name) -> Name {
+  match self.nested_if_aux_ctor(k, c) {
+    Some((e, aux_name)) =>
+      match const_name(k, get_app_fn(k, e)) {
+        Some(i) => name_replace_prefix(k, c, aux_name, i)
+        None => c
+      }
+    None => c
+  }
+}
+
+fn ElimNested::restore_nested(
+  self : ElimNested,
+  k : K,
+  e0 : Expr,
+  nparams : Int,
+  aux_rec : HashMap[Name, Name],
+) -> Expr raise KernelError {
+  let pi = is_pi(k, e0)
+  let as_ : Array[Expr] = Array::new()
+  let mut e = e0
+  for i = 0; i < nparams; i = i + 1 {
+    if not(is_pi(k, e) || is_lam(k, e)) {
+      kfail("internal: restore_nested")
+    }
+    let x = mk_local_decl(k, binding_name(k, e), binding_domain(k, e))
+    as_.push(x)
+    e = instantiate1(k, binding_body(k, e), x)
+  }
+  let param_ids : Array[Int] = Array::new()
+  for p in self.params {
+    param_ids.push(fvar_id(k, p))
+  }
+  let body = replace_expr(k, e, t => {
+    match view(k, t) {
+      VConst(c, ls) =>
+        match aux_rec.get(c) {
+          Some(r) => return Some(mk_const(k, r, ls))
+          None => ()
+        }
+      _ => ()
+    }
+    let fname = match const_name(k, get_app_fn(k, t)) {
+      Some(n) => n
+      None => return None
+    }
+    match self.aux_of(k, fname) {
+      Some(nested) => {
+        let args = get_app_args(k, t)
+        let n2 = instantiate_rev(k, abstract_fvars(k, nested, param_ids), as_)
+        return Some(mk_app_range(k, n2, args, nparams, args.length()))
+      }
+      None => ()
+    }
+    match self.nested_if_aux_ctor(k, fname) {
+      Some((nested, aux_i_name)) => {
+        let args = get_app_args(k, t)
+        let n2 = instantiate_rev(k, abstract_fvars(k, nested, param_ids), as_)
+        let i_f = get_app_fn(k, n2)
+        let i_args = get_app_args(k, n2)
+        match view(k, i_f) {
+          VConst(i_c, i_ls) => {
+            let c2 = mk_const(k, name_replace_prefix(k, fname, aux_i_name, i_c), i_ls)
+            Some(mk_app_range(k, mk_app_n(k, c2, i_args), args, nparams, args.length()))
+          }
+          _ => None
+        }
+      }
+      None => None
+    }
+  })
+  if pi {
+    mk_pi_fvars(k, as_, body)
+  } else {
+    mk_lambda_fvars(k, as_, body)
+  }
+}
+
+fn env_remove(k : K, n : Name) -> Unit {
+  k.env.consts.remove(n)
+}
+
+fn add_inductive(
+  k : K,
+  lparams : List[Name],
+  nparams : Int,
+  types : Array[IndDecl],
+  is_unsafe : Bool,
+) -> Unit raise KernelError {
+  if types.length() == 0 {
+    kfail("invalid empty (mutual) inductive datatype declaration")
+  }
+  for t in types {
+    for c in t.ctors {
+      match find_const(k, c.type, n => name_is_prefix_of(k, name_of_string("_nested"), n)) {
+        Some(_) => kfail("invalid declaration '\{c.name}', it uses the reserved prefix '_nested'")
+        None => ()
+      }
+    }
+  }
+  tc_reset(k, lparams, if is_unsafe { UnsafeDecl } else { SafeDecl })
+  let (_, params) = with_params(k, types[0].type, nparams)
+  let en : ElimNested = {
+    lparams,
+    lvls: lparams.map(n => Param(n)),
+    params,
+    nested_aux: Array::new(),
+    new_types: types.slice(0, types.length()),
+    next_idx: 1,
+  }
+  en.run(k, nparams)
+  let nnested = en.nested_aux.length()
+  if nnested == 0 {
+    add_inductive_core(k, lparams, nparams, types, 0, is_unsafe)
+    return
+  }
+  add_inductive_core(k, lparams, nparams, en.new_types, nnested, is_unsafe)
+  // replace the auxiliary types by the nested occurrences they stand for
+  let all_names : Array[Name] = Array::new()
+  for t in types {
+    all_names.push(t.name)
+  }
+  let all = list_of_array(all_names)
+  let main_name = types[0].name
+  let rec_map : HashMap[Name, Name] = HashMap::new()
+  let old_recs : Array[Name] = Array::new()
+  let mut next = 1
+  for i = types.length(); i < en.new_types.length(); i = i + 1 {
+    let old = mk_rec_name(k, en.new_types[i].name)
+    rec_map.set(old, name_append_index(k, mk_rec_name(k, main_name), next))
+    old_recs.push(old)
+    next = next + 1
+  }
+  let saved : Array[ConstInfo] = Array::new()
+  let process_rec = (rname : Name) => {
+    let new_name = match rec_map.get(rname) {
+      Some(n) => n
+      None => rname
+    }
+    let ci = env_get(k, rname)
+    let rv = match ci.kind {
+      CRec(rv) => rv
+      _ => kfail("internal: not a recursor")
+    }
+    let new_type = en.restore_nested(k, ci.type, nparams, rec_map)
+    let rules : Array[RecRule] = Array::new()
+    let mut cur = rv.rules
+    while cur is Cons(r, rest) {
+      cur = rest
+      let rhs = en.restore_nested(k, r.rhs, nparams, rec_map)
+      let ctor = if new_name == rname { r.ctor } else { en.restore_ctor_name(k, r.ctor) }
+      rules.push({ ctor, nfields: r.nfields, rhs })
+    }
+    saved.push({
+      name: new_name,
+      lparams: ci.lparams,
+      type: new_type,
+      kind: CRec({ ..rv, all, rules: list_of_array(rules) }),
+    })
+  }
+  for t in types {
+    let ci = env_get(k, t.name)
+    match ci.kind {
+      CInduct(iv) => {
+        saved.push({ ..ci, kind: CInduct({ ..iv, all, }) })
+        let mut cur = iv.ctors
+        while cur is Cons(c, rest) {
+          cur = rest
+          let cci = env_get(k, c)
+          saved.push({ ..cci, type: en.restore_nested(k, cci.type, nparams, rec_map) })
+        }
+      }
+      _ => ()
+    }
+    process_rec(mk_rec_name(k, t.name))
+  }
+  for r in old_recs {
+    process_rec(r)
+  }
+  // remove everything the auxiliary declaration added, then add the restored constants
+  for i = 0; i < en.new_types.length(); i = i + 1 {
+    let t = en.new_types[i]
+    env_remove(k, t.name)
+    env_remove(k, mk_rec_name(k, t.name))
+    for c in t.ctors {
+      env_remove(k, c.name)
+    }
+  }
+  for ci in saved {
+    env_check_name(k, ci.name)
+    env_add(k, ci)
+  }
+  for p in en.nested_aux {
+    ignore(check_type(k, p._0))
+  }
+}

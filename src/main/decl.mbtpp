@@ -1,0 +1,201 @@
+// Checking declarations and adding them to the environment (lean4lean's
+// `Environment.lean` and `Quot.lean`).
+
+fn check_constant_val(k : K, name : Name, lparams : List[Name], type_ : Expr) -> Unit raise KernelError {
+  check_dup_lparams(k, lparams)
+  env_check_name(k, name)
+  if has_fvar(k, type_) {
+    kfail("declaration '\{name}' has free variables")
+  }
+  let s = check_type(k, type_)
+  ignore(ensure_sort_core(k, s, type_))
+}
+
+fn check_value(k : K, name : Name, type_ : Expr, value : Expr) -> Unit raise KernelError {
+  if has_fvar(k, value) {
+    kfail("declaration '\{name}' has free variables")
+  }
+  let vt = check_type(k, value)
+  if not(is_def_eq(k, vt, type_)) {
+    kfail("declaration type mismatch: '\{name}'")
+  }
+}
+
+fn add_axiom(k : K, name : Name, lparams : List[Name], type_ : Expr, is_unsafe : Bool) -> Unit raise KernelError {
+  tc_reset(k, lparams, if is_unsafe { UnsafeDecl } else { SafeDecl })
+  check_constant_val(k, name, lparams, type_)
+  env_add(k, { name, lparams, type: type_, kind: CAxiom(is_unsafe) })
+}
+
+fn add_definition(
+  k : K,
+  name : Name,
+  lparams : List[Name],
+  type_ : Expr,
+  value : Expr,
+  hints : Hints,
+  safety : Safety,
+) -> Unit raise KernelError {
+  match safety {
+    UnsafeDecl => {
+      // unsafe definitions may be recursive: add the header first
+      tc_reset(k, lparams, UnsafeDecl)
+      check_constant_val(k, name, lparams, type_)
+      env_add(k, { name, lparams, type: type_, kind: CAxiom(true) })
+      tc_reset(k, lparams, UnsafeDecl)
+      check_value(k, name, type_, value)
+      env_add(k, { name, lparams, type: type_, kind: CDefn(value, hints, safety) })
+    }
+    _ => {
+      tc_reset(k, lparams, SafeDecl)
+      check_constant_val(k, name, lparams, type_)
+      check_value(k, name, type_, value)
+      env_add(k, { name, lparams, type: type_, kind: CDefn(value, hints, safety) })
+    }
+  }
+}
+
+fn add_theorem(k : K, name : Name, lparams : List[Name], type_ : Expr, value : Expr) -> Unit raise KernelError {
+  tc_reset(k, lparams, SafeDecl)
+  check_constant_val(k, name, lparams, type_)
+  if not(is_prop(k, type_)) {
+    kfail("theorem type is not Prop: '\{name}'")
+  }
+  check_value(k, name, type_, value)
+  env_add(k, { name, lparams, type: type_, kind: CThm(value) })
+}
+
+fn add_opaque(k : K, name : Name, lparams : List[Name], type_ : Expr, value : Expr, is_unsafe : Bool) -> Unit raise KernelError {
+  tc_reset(k, lparams, if is_unsafe { UnsafeDecl } else { SafeDecl })
+  check_constant_val(k, name, lparams, type_)
+  check_value(k, name, type_, value)
+  env_add(k, { name, lparams, type: type_, kind: COpaque(value, is_unsafe) })
+}
+
+// ---- quotients -----------------------------------------------------------------------
+
+fn prop_sort(k : K) -> Expr {
+  mk_sort(k, Zero)
+}
+
+fn arrow(k : K, a : Expr, b : Expr) -> Expr {
+  // `b` must not have loose bvars
+  mk_pi(k, name_of_string("a"), a, lift_loose_bvars(k, b, 0, 1), BDefault)
+}
+
+fn check_eq_type(k : K) -> Unit raise KernelError {
+  let ci = match env_find(k, k.names.eq) {
+    Some(ci) => ci
+    None => kfail("failed to initialize quot module, environment does not have 'Eq' type")
+  }
+  let iv = match ci.kind {
+    CInduct(iv) => iv
+    _ => kfail("failed to initialize quot module, 'Eq' is not an inductive type")
+  }
+  let u = match ci.lparams {
+    Cons(u, Nil) => u
+    _ => kfail("failed to initialize quot module, unexpected number of universe params at 'Eq' type")
+  }
+  let refl = match iv.ctors {
+    Cons(c, Nil) => c
+    _ => kfail("failed to initialize quot module, unexpected number of constructors for 'Eq' type")
+  }
+  let su = mk_sort(k, Param(u))
+  // {α : Sort u} → α → α → Prop
+  let expected = mk_pi(k, Anon, su, mk_pi(k, Anon, mk_bvar(k, 0), mk_pi(k, Anon, mk_bvar(k, 1), prop_sort(k), BDefault), BDefault), BImplicit)
+  if ci.type != expected {
+    kfail("failed to initialize quot module, 'Eq' has an unexpected type")
+  }
+  let rci = env_get(k, refl)
+  let u2 = match rci.lparams {
+    Cons(u2, Nil) => u2
+    _ => kfail("failed to initialize quot module, unexpected number of universe params at 'Eq' type constructor")
+  }
+  // {α : Sort u} → (a : α) → @Eq α a a
+  let eq_c = mk_const(k, k.names.eq, Cons(Param(u2), Nil))
+  let rexp = mk_pi(k, Anon, mk_sort(k, Param(u2)), mk_pi(k, Anon, mk_bvar(k, 0), mk_app(k, mk_app(k, mk_app(k, eq_c, mk_bvar(k, 1)), mk_bvar(k, 0)), mk_bvar(k, 0)), BDefault), BImplicit)
+  if rci.type != rexp {
+    kfail("failed to initialize quot module, unexpected type for 'Eq' type constructor")
+  }
+}
+
+// The expected types of the quotient constants, over the given universe k.names.
+fn quot_type(k : K, u : Name) -> Expr {
+  let su = mk_sort(k, Param(u))
+  // {α : Sort u} → (r : α → α → Prop) → Sort u
+  let r_ty = mk_pi(k, Anon, mk_bvar(k, 0), mk_pi(k, Anon, mk_bvar(k, 1), prop_sort(k), BDefault), BDefault)
+  mk_pi(k, Anon, su, mk_pi(k, Anon, r_ty, su, BDefault), BImplicit)
+}
+
+fn quot_mk_type(k : K, u : Name) -> Expr {
+  let su = mk_sort(k, Param(u))
+  let r_ty = mk_pi(k, Anon, mk_bvar(k, 0), mk_pi(k, Anon, mk_bvar(k, 1), prop_sort(k), BDefault), BDefault)
+  let q = mk_const(k, k.names.quot, Cons(Param(u), Nil))
+  // {α} → (r) → (a : α) → @Quot α r
+  mk_pi(k, Anon, su, mk_pi(k, Anon, r_ty, mk_pi(k, Anon, mk_bvar(k, 1), mk_app(k, mk_app(k, q, mk_bvar(k, 2)), mk_bvar(k, 1)), BDefault), BDefault), BImplicit)
+}
+
+fn quot_lift_type(k : K, u : Name, v : Name) -> Expr {
+  let su = mk_sort(k, Param(u))
+  let sv = mk_sort(k, Param(v))
+  let r_ty = mk_pi(k, Anon, mk_bvar(k, 0), mk_pi(k, Anon, mk_bvar(k, 1), prop_sort(k), BDefault), BDefault)
+  let q = mk_const(k, k.names.quot, Cons(Param(u), Nil))
+  let eqv = mk_const(k, k.names.eq, Cons(Param(v), Nil))
+  // context: α r β f
+  let f_ty = mk_pi(k, Anon, mk_bvar(k, 2), mk_bvar(k, 1), BDefault)
+  // ∀ a b : α, r a b → f a = f b      (under α r β f)
+  let h_ty = mk_pi(k, Anon, mk_bvar(k, 3), mk_pi(k, Anon, mk_bvar(k, 4), mk_pi(k, Anon, mk_app(k, mk_app(k, mk_bvar(k, 4), mk_bvar(k, 1)), mk_bvar(k, 0)),
+    mk_app(k, mk_app(k, mk_app(k, eqv, mk_bvar(k, 4)), mk_app(k, mk_bvar(k, 3), mk_bvar(k, 2))), mk_app(k, mk_bvar(k, 3), mk_bvar(k, 1))), BDefault), BDefault), BDefault)
+  // under α r β f h: @Quot α r → β
+  let rest = mk_pi(k, Anon, mk_app(k, mk_app(k, q, mk_bvar(k, 4)), mk_bvar(k, 3)), mk_bvar(k, 3), BDefault)
+  mk_pi(k, Anon, su, mk_pi(k, Anon, r_ty, mk_pi(k, Anon, sv, mk_pi(k, Anon, f_ty, mk_pi(k, Anon, h_ty, rest, BDefault), BDefault), BImplicit), BImplicit), BImplicit)
+}
+
+fn quot_ind_type(k : K, u : Name) -> Expr {
+  let su = mk_sort(k, Param(u))
+  let r_ty = mk_pi(k, Anon, mk_bvar(k, 0), mk_pi(k, Anon, mk_bvar(k, 1), prop_sort(k), BDefault), BDefault)
+  let q = mk_const(k, k.names.quot, Cons(Param(u), Nil))
+  let qmk = mk_const(k, k.names.quot_mk, Cons(Param(u), Nil))
+  // β : @Quot α r → Prop   (under α r)
+  let b_ty = mk_pi(k, Anon, mk_app(k, mk_app(k, q, mk_bvar(k, 1)), mk_bvar(k, 0)), prop_sort(k), BDefault)
+  // mk : ∀ a : α, β (Quot.mk r a)   (under α r β)
+  let mk_ty = mk_pi(k, Anon, mk_bvar(k, 2), mk_app(k, mk_bvar(k, 1), mk_app(k, mk_app(k, mk_app(k, qmk, mk_bvar(k, 3)), mk_bvar(k, 2)), mk_bvar(k, 0))), BDefault)
+  // ∀ q : @Quot α r, β q   (under α r β mk)
+  let rest = mk_pi(k, Anon, mk_app(k, mk_app(k, q, mk_bvar(k, 3)), mk_bvar(k, 2)), mk_app(k, mk_bvar(k, 2), mk_bvar(k, 0)), BDefault)
+  mk_pi(k, Anon, su, mk_pi(k, Anon, r_ty, mk_pi(k, Anon, b_ty, mk_pi(k, Anon, mk_ty, rest, BDefault), BImplicit), BImplicit), BImplicit)
+}
+
+fn add_quot(k : K) -> Unit raise KernelError {
+  if k.env.quot_init {
+    return
+  }
+  check_eq_type(k)
+  env_check_name(k, k.names.quot)
+  env_check_name(k, k.names.quot_mk)
+  env_check_name(k, k.names.quot_lift)
+  env_check_name(k, k.names.quot_ind)
+  let u = name_of_string("u")
+  let v = name_of_string("v")
+  let one = Cons(u, Nil)
+  env_add(k, { name: k.names.quot, lparams: one, type: quot_type(k, u), kind: CQuot(QType) })
+  env_add(k, { name: k.names.quot_mk, lparams: one, type: quot_mk_type(k, u), kind: CQuot(QCtor) })
+  env_add(k, { name: k.names.quot_lift, lparams: Cons(u, Cons(v, Nil)), type: quot_lift_type(k, u, v), kind: CQuot(QLift) })
+  env_add(k, { name: k.names.quot_ind, lparams: one, type: quot_ind_type(k, u), kind: CQuot(QInd) })
+  k.env.quot_init = true
+}
+
+// A quotient declaration of the export: it must agree with the built-in one,
+// up to the names of the universe parameters.
+fn check_quot_decl(k : K, name : Name, lparams : List[Name], type_ : Expr, kind : QuotKind) -> Unit raise KernelError {
+  add_quot(k)
+  let expected = match (kind, lparams) {
+    (QType, Cons(u, Nil)) => if name == k.names.quot { quot_type(k, u) } else { -1 }
+    (QCtor, Cons(u, Nil)) => if name == k.names.quot_mk { quot_mk_type(k, u) } else { -1 }
+    (QLift, Cons(u, Cons(v, Nil))) => if name == k.names.quot_lift { quot_lift_type(k, u, v) } else { -1 }
+    (QInd, Cons(u, Nil)) => if name == k.names.quot_ind { quot_ind_type(k, u) } else { -1 }
+    _ => -1
+  }
+  if expected < 0 || expected != type_ {
+    kfail("invalid quotient declaration '\{name}'")
+  }
+}

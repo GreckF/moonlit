@@ -1,0 +1,344 @@
+// Universe levels.
+//
+// The meaning of a level is given by `eval` under an assignment of natural
+// numbers to the parameters; `l1 <= l2` means `eval(l1) <= eval(l2)` under
+// every assignment. `level_leq` decides it completely: it case splits on the
+// parameters that block an `imax` (each is either zero or a successor), after
+// which both sides are `max`es of `param + k` and constants, compared
+// sublevel by sublevel.
+
+enum Level {
+  Zero
+  Succ(Level)
+  Max(Level, Level)
+  IMax(Level, Level)
+  Param(Name)
+}
+
+fn imax_nat(a : Nat, b : Nat) -> Nat {
+  match b {
+    Z => Z
+    S(_) => if a.compare(b) > 0 { a } else { b }
+  }
+}
+
+fn max_nat(a : Nat, b : Nat) -> Nat {
+  if a.compare(b) > 0 { a } else { b }
+}
+
+// The semantics of levels (the specification of `level_leq`).
+fn Level::eval(self : Level, rho : (Name) -> Nat) -> Nat {
+  match self {
+    Zero => Z
+    Succ(l) => S(l.eval(rho))
+    Max(a, b) => max_nat(a.eval(rho), b.eval(rho))
+    IMax(a, b) => imax_nat(a.eval(rho), b.eval(rho))
+    Param(n) => rho(n)
+  }
+}
+
+fn Level::level_eq(self : Level, other : Level) -> Bool {
+  match (self, other) {
+    (Zero, Zero) => true
+    (Succ(a), Succ(b)) => a.level_eq(b)
+    (Max(a1, b1), Max(a2, b2)) => a1.level_eq(a2) && b1.level_eq(b2)
+    (IMax(a1, b1), IMax(a2, b2)) => a1.level_eq(a2) && b1.level_eq(b2)
+    (Param(n1), Param(n2)) => n1 == n2
+    _ => false
+  }
+}
+
+impl Eq for Level with op_equal(a, b) { a.level_eq(b) }
+
+fn Level::hash_of(self : Level) -> Int {
+  match self {
+    Zero => 7
+    Succ(l) => combine_hash(l.hash_of(), 11)
+    Max(a, b) => combine_hash(combine_hash(a.hash_of(), b.hash_of()), 13)
+    IMax(a, b) => combine_hash(combine_hash(a.hash_of(), b.hash_of()), 17)
+    Param(n) => combine_hash(n.hash_of(), 19)
+  }
+}
+
+impl Hash for Level with hash(self) { self.hash_of() }
+
+impl Show for Level with to_string(self) {
+  match self {
+    Zero => "0"
+    Succ(l) => "(" + l.to_string() + "+1)"
+    Max(a, b) => "(max " + a.to_string() + " " + b.to_string() + ")"
+    IMax(a, b) => "(imax " + a.to_string() + " " + b.to_string() + ")"
+    Param(n) => n.to_string()
+  }
+}
+
+fn level_list_hash(ls : List[Level]) -> Int {
+  match ls {
+    Nil => 3
+    Cons(l, rest) => combine_hash(l.hash_of(), level_list_hash(rest))
+  }
+}
+
+fn level_list_eq(a : List[Level], b : List[Level]) -> Bool {
+  match (a, b) {
+    (Nil, Nil) => true
+    (Cons(x, xs), Cons(y, ys)) => x.level_eq(y) && level_list_eq(xs, ys)
+    _ => false
+  }
+}
+
+fn Level::has_param(self : Level) -> Bool {
+  match self {
+    Zero => false
+    Succ(l) => l.has_param()
+    Max(a, b) | IMax(a, b) => a.has_param() || b.has_param()
+    Param(_) => true
+  }
+}
+
+fn name_mem(n : Name, ns : List[Name]) -> Bool {
+  match ns {
+    Nil => false
+    Cons(m, rest) => m == n || name_mem(n, rest)
+  }
+}
+
+// A parameter of `l` that is not among `ps`.
+fn Level::undef_param(self : Level, ps : List[Name]) -> Name? {
+  match self {
+    Zero => None
+    Succ(l) => l.undef_param(ps)
+    Max(a, b) | IMax(a, b) =>
+      match a.undef_param(ps) {
+        Some(n) => Some(n)
+        None => b.undef_param(ps)
+      }
+    Param(n) => if name_mem(n, ps) { None } else { Some(n) }
+  }
+}
+
+fn Level::instantiate(self : Level, ps : List[Name], us : List[Level]) -> Level {
+  match self {
+    Zero => Zero
+    Succ(l) => Succ(l.instantiate(ps, us))
+    Max(a, b) => Max(a.instantiate(ps, us), b.instantiate(ps, us))
+    IMax(a, b) => IMax(a.instantiate(ps, us), b.instantiate(ps, us))
+    Param(n) => level_lookup(n, ps, us, self)
+  }
+}
+
+fn level_lookup(n : Name, ps : List[Name], us : List[Level], dflt : Level) -> Level {
+  match (ps, us) {
+    (Cons(p, ps2), Cons(u, us2)) => if p == n { u } else { level_lookup(n, ps2, us2, dflt) }
+    _ => dflt
+  }
+}
+
+// `imax` with the kernel's cheap simplifications (Lean's `mkLevelIMax'`).
+fn mk_imax(a : Level, b : Level) -> Level {
+  if b.is_never_zero() {
+    mk_max(a, b)
+  } else if b.is_always_zero() {
+    b
+  } else if a.is_always_zero() {
+    b
+  } else if a.level_eq(Succ(Zero)) {
+    b
+  } else if a.level_eq(b) {
+    a
+  } else {
+    IMax(a, b)
+  }
+}
+
+fn mk_max(a : Level, b : Level) -> Level {
+  if a.is_always_zero() {
+    b
+  } else if b.is_always_zero() {
+    a
+  } else if a.level_eq(b) {
+    a
+  } else {
+    Max(a, b)
+  }
+}
+
+// Positive under every assignment (a syntactic check, as in Lean).
+fn Level::is_never_zero(self : Level) -> Bool {
+  match self {
+    Zero => false
+    Succ(_) => true
+    Max(a, b) => a.is_never_zero() || b.is_never_zero()
+    IMax(_, b) => b.is_never_zero()
+    Param(_) => false
+  }
+}
+
+// Zero under every assignment.
+fn Level::is_always_zero(self : Level) -> Bool {
+  match self {
+    Zero => true
+    Succ(_) => false
+    Max(a, b) => a.is_always_zero() && b.is_always_zero()
+    IMax(_, b) => b.is_always_zero()
+    Param(_) => false
+  }
+}
+
+// ---- the decision procedure ---------------------------------------------------------
+
+// Push `imax` down until each remaining one is blocked on a parameter.
+fn Level::push_imax(self : Level) -> Level {
+  match self {
+    Zero | Param(_) => self
+    Succ(l) => Succ(l.push_imax())
+    Max(a, b) => Max(a.push_imax(), b.push_imax())
+    IMax(a, b) => imax_core(a.push_imax(), b.push_imax())
+  }
+}
+
+fn imax_core(a : Level, b : Level) -> Level {
+  match b {
+    Zero => Zero
+    Succ(_) => Max(a, b)
+    Max(b1, b2) => Max(imax_core(a, b1), imax_core(a, b2))
+    IMax(b1, b2) => Max(imax_core(a, b2), imax_core(b1, b2))
+    Param(_) => IMax(a, b)
+  }
+}
+
+// A parameter blocking an `imax`, if any.
+fn Level::blocking_param(self : Level) -> Name? {
+  match self {
+    Zero | Param(_) => None
+    Succ(l) => l.blocking_param()
+    Max(a, b) =>
+      match a.blocking_param() {
+        Some(n) => Some(n)
+        None => b.blocking_param()
+      }
+    IMax(a, b) =>
+      match b {
+        Param(n) => Some(n)
+        _ =>
+          match a.blocking_param() {
+            Some(n) => Some(n)
+            None => b.blocking_param()
+          }
+      }
+  }
+}
+
+fn Level::subst_param(self : Level, p : Name, v : Level) -> Level {
+  match self {
+    Zero => Zero
+    Succ(l) => Succ(l.subst_param(p, v))
+    Max(a, b) => Max(a.subst_param(p, v), b.subst_param(p, v))
+    IMax(a, b) => IMax(a.subst_param(p, v), b.subst_param(p, v))
+    Param(n) => if n == p { v } else { self }
+  }
+}
+
+// An imax-free level as `max(c, p1 + k1, ...)`.
+struct Flat {
+  mut c : Int
+  vars : Array[(Name, Int)]
+}
+
+fn Flat::add_var(self : Flat, p : Name, k : Int) -> Unit {
+  for i = 0; i < self.vars.length(); i = i + 1 {
+    if self.vars[i]._0 == p {
+      if self.vars[i]._1 < k {
+        self.vars[i] = (p, k)
+      }
+      return
+    }
+  }
+  self.vars.push((p, k))
+}
+
+fn flatten_into(l : Level, k : Int, acc : Flat) -> Unit {
+  match l {
+    Zero => if acc.c < k { acc.c = k }
+    Succ(u) => flatten_into(u, k + 1, acc)
+    Max(a, b) => {
+      flatten_into(a, k, acc)
+      flatten_into(b, k, acc)
+    }
+    // unreachable after `push_imax` and case splitting
+    IMax(a, b) => {
+      flatten_into(a, k, acc)
+      flatten_into(b, k, acc)
+    }
+    Param(p) => acc.add_var(p, k)
+  }
+}
+
+fn flat_leq(a : Level, b : Level) -> Bool {
+  let fa : Flat = { c: 0, vars: Array::new() }
+  let fb : Flat = { c: 0, vars: Array::new() }
+  flatten_into(a, 0, fa)
+  flatten_into(b, 0, fb)
+  // the constant of `a`: dominated by the constant of `b`, or by some
+  // `q + k` with `k` large enough (as `q >= 0`)
+  let mut ok_c = fa.c <= fb.c
+  for v in fb.vars {
+    if fa.c <= v._1 {
+      ok_c = true
+    }
+  }
+  if not(ok_c) {
+    return false
+  }
+  // each `p + k` of `a` needs `p + k'` in `b` with `k <= k'`
+  for v in fa.vars {
+    let mut found = false
+    for w in fb.vars {
+      if w._0 == v._0 && v._1 <= w._1 {
+        found = true
+      }
+    }
+    if not(found) {
+      return false
+    }
+  }
+  true
+}
+
+fn leq_core(a : Level, b : Level, fuel : Int) -> Bool {
+  let a1 = a.push_imax()
+  let b1 = b.push_imax()
+  let blk = match a1.blocking_param() {
+    Some(n) => Some(n)
+    None => b1.blocking_param()
+  }
+  match blk {
+    None => flat_leq(a1, b1)
+    Some(p) =>
+      if fuel <= 0 {
+        false
+      } else {
+        let z = Zero
+        let s = Succ(Param(p))
+        leq_core(a1.subst_param(p, z), b1.subst_param(p, z), fuel - 1) &&
+        leq_core(a1.subst_param(p, s), b1.subst_param(p, s), fuel - 1)
+      }
+  }
+}
+
+// `a <= b` under every assignment.
+fn level_leq(a : Level, b : Level) -> Bool {
+  a.level_eq(b) || leq_core(a, b, 64)
+}
+
+fn level_equiv(a : Level, b : Level) -> Bool {
+  a.level_eq(b) || (leq_core(a, b, 64) && leq_core(b, a, 64))
+}
+
+fn level_list_equiv(a : List[Level], b : List[Level]) -> Bool {
+  match (a, b) {
+    (Nil, Nil) => true
+    (Cons(x, xs), Cons(y, ys)) => level_equiv(x, y) && level_list_equiv(xs, ys)
+    _ => false
+  }
+}

@@ -1,0 +1,11 @@
+.mooncakes/
+_build/
+target/
+_mbtpp_build/
+mbtpp_out/
+# build output of scripts/build.sh
+bin/moonlit.mjs
+# the lean-kernel-arena tests (see README)
+tests/arena/
+SUGGESTIONS.md
+bugs/

@@ -1,0 +1,273 @@
+// A small JSON parser for the lean4export NDJSON format. Numbers are kept as
+// their source text: natural number literals can be arbitrarily large.
+
+enum Json {
+  JNull
+  JBool(Bool)
+  JNum(String)
+  JStr(String)
+  JArr(Array[Json])
+  JObj(Array[(String, Json)])
+}
+
+struct JsonParser {
+  src : String
+  mut pos : Int
+}
+
+fn JsonParser::peek(self : JsonParser) -> Int {
+  if self.pos < self.src.length() { self.src[self.pos].to_int() } else { -1 }
+}
+
+fn JsonParser::skip_ws(self : JsonParser) -> Unit {
+  while self.pos < self.src.length() {
+    let c = self.src[self.pos].to_int()
+    if c == 32 || c == 9 || c == 10 || c == 13 {
+      self.pos = self.pos + 1
+    } else {
+      break
+    }
+  }
+}
+
+fn JsonParser::expect(self : JsonParser, c : Int) -> Unit raise KernelError {
+  self.skip_ws()
+  if self.peek() != c {
+    kfail("json: expected '\{c.unsafe_to_char()}' at \{self.pos}")
+  }
+  self.pos = self.pos + 1
+}
+
+fn hex_digit(c : Int) -> Int raise KernelError {
+  if c >= 48 && c <= 57 {
+    c - 48
+  } else if c >= 97 && c <= 102 {
+    c - 87
+  } else if c >= 65 && c <= 70 {
+    c - 55
+  } else {
+    kfail("json: bad hex digit")
+  }
+}
+
+fn JsonParser::hex4(self : JsonParser) -> Int raise KernelError {
+  let mut v = 0
+  for k = 0; k < 4; k = k + 1 {
+    v = v * 16 + hex_digit(self.peek())
+    self.pos = self.pos + 1
+  }
+  v
+}
+
+fn JsonParser::string(self : JsonParser) -> String raise KernelError {
+  self.expect(34)
+  let mut acc = ""
+  let mut start = self.pos
+  while true {
+    let c = self.peek()
+    if c == -1 {
+      kfail("json: unterminated string")
+    } else if c == 34 {
+      acc = acc + self.src.substring(start, self.pos)
+      self.pos = self.pos + 1
+      break
+    } else if c == 92 {
+      acc = acc + self.src.substring(start, self.pos)
+      self.pos = self.pos + 1
+      let e = self.peek()
+      self.pos = self.pos + 1
+      if e == 110 {
+        acc = acc + "\n"
+      } else if e == 116 {
+        acc = acc + "\t"
+      } else if e == 114 {
+        acc = acc + "\r"
+      } else if e == 98 {
+        acc = acc + (8).unsafe_to_char().to_string()
+      } else if e == 102 {
+        acc = acc + (12).unsafe_to_char().to_string()
+      } else if e == 117 {
+        let mut u = self.hex4()
+        // a surrogate pair stands for one code point
+        if u >= 0xD800 && u < 0xDC00 && self.peek() == 92 {
+          let save = self.pos
+          self.pos = self.pos + 1
+          if self.peek() == 117 {
+            self.pos = self.pos + 1
+            let lo = self.hex4()
+            if lo >= 0xDC00 && lo < 0xE000 {
+              u = 0x10000 + (u - 0xD800) * 0x400 + (lo - 0xDC00)
+            } else {
+              self.pos = save
+            }
+          } else {
+            self.pos = save
+          }
+        }
+        acc = acc + u.unsafe_to_char().to_string()
+      } else {
+        // \" \\ \/
+        acc = acc + e.unsafe_to_char().to_string()
+      }
+      start = self.pos
+    } else {
+      self.pos = self.pos + 1
+    }
+  }
+  acc
+}
+
+fn is_num_char(c : Int) -> Bool {
+  (c >= 48 && c <= 57) || c == 45 || c == 43 || c == 46 || c == 101 || c == 69
+}
+
+fn JsonParser::value(self : JsonParser) -> Json raise KernelError {
+  self.skip_ws()
+  let c = self.peek()
+  if c == 123 {
+    self.pos = self.pos + 1
+    let fields : Array[(String, Json)] = Array::new()
+    self.skip_ws()
+    if self.peek() == 125 {
+      self.pos = self.pos + 1
+      return JObj(fields)
+    }
+    while true {
+      self.skip_ws()
+      let k = self.string()
+      self.expect(58)
+      let v = self.value()
+      fields.push((k, v))
+      self.skip_ws()
+      if self.peek() == 44 {
+        self.pos = self.pos + 1
+      } else {
+        self.expect(125)
+        break
+      }
+    }
+    JObj(fields)
+  } else if c == 91 {
+    self.pos = self.pos + 1
+    let items : Array[Json] = Array::new()
+    self.skip_ws()
+    if self.peek() == 93 {
+      self.pos = self.pos + 1
+      return JArr(items)
+    }
+    while true {
+      items.push(self.value())
+      self.skip_ws()
+      if self.peek() == 44 {
+        self.pos = self.pos + 1
+      } else {
+        self.expect(93)
+        break
+      }
+    }
+    JArr(items)
+  } else if c == 34 {
+    JStr(self.string())
+  } else if c == 116 {
+    self.pos = self.pos + 4
+    JBool(true)
+  } else if c == 102 {
+    self.pos = self.pos + 5
+    JBool(false)
+  } else if c == 110 {
+    self.pos = self.pos + 4
+    JNull
+  } else if is_num_char(c) {
+    let start = self.pos
+    while is_num_char(self.peek()) {
+      self.pos = self.pos + 1
+    }
+    JNum(self.src.substring(start, self.pos))
+  } else {
+    kfail("json: unexpected character at \{self.pos}")
+  }
+}
+
+fn parse_json(s : String) -> Json raise KernelError {
+  let p : JsonParser = { src: s, pos: 0 }
+  p.value()
+}
+
+// ---- accessors -------------------------------------------------------------------
+
+fn Json::field(self : Json, key : String) -> Json? {
+  match self {
+    JObj(fields) => {
+      for f in fields {
+        if f._0 == key {
+          return Some(f._1)
+        }
+      }
+      None
+    }
+    _ => None
+  }
+}
+
+fn Json::get(self : Json, key : String) -> Json raise KernelError {
+  match self.field(key) {
+    Some(v) => v
+    None => kfail("json: missing field \"\{key}\"")
+  }
+}
+
+fn digits_to_int(s : String) -> Int raise KernelError {
+  let mut v = 0
+  for i = 0; i < s.length(); i = i + 1 {
+    let c = s[i].to_int()
+    if c < 48 || c > 57 {
+      kfail("json: not a natural number: \{s}")
+    }
+    v = v * 10 + (c - 48)
+  }
+  v
+}
+
+fn Json::to_int(self : Json) -> Int raise KernelError {
+  match self {
+    JNum(s) => digits_to_int(s)
+    _ => kfail("json: expected a number")
+  }
+}
+
+fn Json::to_str(self : Json) -> String raise KernelError {
+  match self {
+    JStr(s) => s
+    _ => kfail("json: expected a string")
+  }
+}
+
+fn Json::to_bool(self : Json) -> Bool raise KernelError {
+  match self {
+    JBool(b) => b
+    _ => kfail("json: expected a boolean")
+  }
+}
+
+fn Json::to_arr(self : Json) -> Array[Json] raise KernelError {
+  match self {
+    JArr(xs) => xs
+    _ => kfail("json: expected an array")
+  }
+}
+
+// The single key of a one-field object other than the given ones, e.g. the
+// expression kind in `{"ie": 3, "app": {...}}`.
+fn Json::kind_except(self : Json, skip : String) -> (String, Json) raise KernelError {
+  match self {
+    JObj(fields) => {
+      for f in fields {
+        if f._0 != skip {
+          return (f._0, f._1)
+        }
+      }
+      kfail("json: record without a kind")
+    }
+    _ => kfail("json: expected an object")
+  }
+}

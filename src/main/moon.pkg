@@ -1,0 +1,20 @@
+import {
+  "moonbitlang/core/env",
+  "moonbitlang/x/fs",
+}
+
+options(
+  "is-main": true,
+  "mbtpp-order": [
+    "util.mbtpp",
+    "json.mbtpp",
+    "name.mbtpp",
+    "level.mbtpp",
+    "expr.mbtpp",
+    "env.mbtpp",
+    "tc.mbtpp",
+    "inductive.mbtpp",
+    "decl.mbtpp",
+    "loader.mbtpp",
+  ],
+)

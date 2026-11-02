@@ -1,0 +1,443 @@
+// Reading a lean4export (format 3.1) NDJSON file and replaying it into the
+// kernel: names, levels and expressions are built as they are defined;
+// declarations are checked in order.
+
+struct Tables {
+  names : Array[Name?]
+  levels : Array[Level?]
+  exprs : Array[Int]
+}
+
+fn[T] set_opt(a : Array[T?], i : Int, x : T) -> Unit {
+  while a.length() <= i {
+    a.push(None)
+  }
+  a[i] = Some(x)
+}
+
+fn Tables::name(self : Tables, k : K, i : Int) -> Name raise KernelError {
+  if i == 0 {
+    return Anon
+  }
+  if i < self.names.length() {
+    match self.names[i] {
+      Some(n) => return n
+      None => ()
+    }
+  }
+  kfail("undefined name index \{i}")
+}
+
+fn Tables::level(self : Tables, k : K, i : Int) -> Level raise KernelError {
+  if i == 0 {
+    return Zero
+  }
+  if i < self.levels.length() {
+    match self.levels[i] {
+      Some(l) => return l
+      None => ()
+    }
+  }
+  kfail("undefined level index \{i}")
+}
+
+fn Tables::expr(self : Tables, k : K, i : Int) -> Expr raise KernelError {
+  if i >= 0 && i < self.exprs.length() && self.exprs[i] >= 0 {
+    // the export is a DAG: a node referenced by index may have several parents
+    k.arena.shared[self.exprs[i]] = true
+    return self.exprs[i]
+  }
+  kfail("undefined expression index \{i}")
+}
+
+fn Tables::name_list(self : Tables, k : K, j : Json) -> List[Name] raise KernelError {
+  let out : Array[Name] = Array::new()
+  for x in j.to_arr() {
+    out.push(self.name(k, x.to_int()))
+  }
+  list_of_array(out)
+}
+
+fn Tables::level_list(self : Tables, k : K, j : Json) -> List[Level] raise KernelError {
+  let out : Array[Level] = Array::new()
+  for x in j.to_arr() {
+    out.push(self.level(k, x.to_int()))
+  }
+  list_of_array(out)
+}
+
+fn binder_info_of(k : K, s : String) -> BinderInfo {
+  if s == "implicit" {
+    BImplicit
+  } else if s == "strictImplicit" {
+    BStrictImplicit
+  } else if s == "instImplicit" {
+    BInstImplicit
+  } else {
+    BDefault
+  }
+}
+
+fn Tables::read_expr(self : Tables, k : K, kind : String, v : Json) -> Expr raise KernelError {
+  if kind == "bvar" {
+    mk_bvar(k, v.to_int())
+  } else if kind == "sort" {
+    mk_sort(k, self.level(k, v.to_int()))
+  } else if kind == "const" {
+    mk_const(k, self.name(k, v.get("name").to_int()), self.level_list(k, v.get("us")))
+  } else if kind == "app" {
+    mk_app(k, self.expr(k, v.get("fn").to_int()), self.expr(k, v.get("arg").to_int()))
+  } else if kind == "lam" || kind == "forallE" {
+    let n = self.name(k, v.get("name").to_int())
+    let t = self.expr(k, v.get("type").to_int())
+    let b = self.expr(k, v.get("body").to_int())
+    let bi = binder_info_of(k, v.get("binderInfo").to_str())
+    if kind == "lam" { mk_lam(k, n, t, b, bi) } else { mk_pi(k, n, t, b, bi) }
+  } else if kind == "letE" {
+    mk_let(k, 
+      self.name(k, v.get("name").to_int()),
+      self.expr(k, v.get("type").to_int()),
+      self.expr(k, v.get("value").to_int()),
+      self.expr(k, v.get("body").to_int()),
+    )
+  } else if kind == "natVal" {
+    match v {
+      JStr(s) | JNum(s) => mk_nat_lit(k, nat_of_digits(s))
+      _ => kfail("bad natVal")
+    }
+  } else if kind == "strVal" {
+    mk_str_lit(k, v.to_str())
+  } else if kind == "proj" {
+    mk_proj(k, 
+      self.name(k, v.get("typeName").to_int()),
+      v.get("idx").to_int(),
+      self.expr(k, v.get("struct").to_int()),
+    )
+  } else if kind == "mdata" {
+    self.expr(k, v.get("expr").to_int())
+  } else {
+    kfail("unknown expression kind \{kind}")
+  }
+}
+
+// a decimal numeral (literals can be arbitrarily large)
+fn nat_of_digits(s : String) -> Nat raise KernelError {
+  let mut n : Nat = 0
+  for i = 0; i < s.length(); i = i + 1 {
+    let c = s[i].to_int()
+    if c < 48 || c > 57 {
+      kfail("bad natural number literal \{s}")
+    }
+    n = n * 10 + int_to_nat(c - 48)
+  }
+  n
+}
+
+fn hints_of(k : K, j : Json) -> Hints raise KernelError {
+  match j {
+    JStr(s) => if s == "abbrev" { HAbbrev } else { HOpaque }
+    JObj(_) => HRegular(j.get("regular").to_int())
+    _ => kfail("bad hints")
+  }
+}
+
+fn safety_of(k : K, s : String) -> Safety {
+  if s == "unsafe" {
+    UnsafeDecl
+  } else if s == "partial" {
+    PartialDecl
+  } else {
+    SafeDecl
+  }
+}
+
+fn quot_kind_of(k : K, s : String) -> QuotKind raise KernelError {
+  if s == "type" {
+    QType
+  } else if s == "ctor" {
+    QCtor
+  } else if s == "lift" {
+    QLift
+  } else if s == "ind" {
+    QInd
+  } else {
+    kfail("bad quot kind")
+  }
+}
+
+fn bool_field(k : K, v : Json, key : String) -> Bool raise KernelError {
+  match v.field(key) {
+    Some(b) => b.to_bool()
+    None => false
+  }
+}
+
+fn names_eq(k : K, a : List[Name], b : List[Name]) -> Bool {
+  match (a, b) {
+    (Nil, Nil) => true
+    (Cons(x, xs), Cons(y, ys)) => x == y && names_eq(k, xs, ys)
+    _ => false
+  }
+}
+
+fn rules_eq(k : K, a : List[RecRule], b : List[RecRule]) -> Bool {
+  match (a, b) {
+    (Nil, Nil) => true
+    (Cons(x, xs), Cons(y, ys)) =>
+      x.ctor == y.ctor && x.nfields == y.nfields && x.rhs == y.rhs && rules_eq(k, xs, ys)
+    _ => false
+  }
+}
+
+fn Tables::read_inductive(self : Tables, k : K, v : Json) -> Unit raise KernelError {
+  let types_j = v.get("types").to_arr()
+  let ctors_j = v.get("ctors").to_arr()
+  let recs_j = v.get("recs").to_arr()
+  if types_j.length() == 0 {
+    kfail("inductive declaration without types")
+  }
+  // constructor types by name
+  let ctor_types : HashMap[Name, Expr] = HashMap::new()
+  for c in ctors_j {
+    let n = self.name(k, c.get("name").to_int())
+    if ctor_types.contains(n) {
+      kfail("duplicate constructor '\{n}'")
+    }
+    ctor_types.set(n, self.expr(k, c.get("type").to_int()))
+  }
+  let decls : Array[IndDecl] = Array::new()
+  let used : HashMap[Name, Bool] = HashMap::new()
+  for t in types_j {
+    let cs : Array[CtorDecl] = Array::new()
+    for cn in t.get("ctors").to_arr() {
+      let n = self.name(k, cn.to_int())
+      match ctor_types.get(n) {
+        Some(ct) => cs.push({ name: n, type: ct })
+        None => kfail("constructor '\{n}' is not declared")
+      }
+      used.set(n, true)
+    }
+    decls.push({ name: self.name(k, t.get("name").to_int()), type: self.expr(k, t.get("type").to_int()), ctors: cs })
+  }
+  for c in ctors_j {
+    let n = self.name(k, c.get("name").to_int())
+    if not(used.contains(n)) {
+      kfail("constructor '\{n}' does not belong to the declaration")
+    }
+  }
+  let t0 = types_j[0]
+  let lparams = self.name_list(k, t0.get("levelParams"))
+  let nparams = t0.get("numParams").to_int()
+  let is_unsafe = bool_field(k, t0, "isUnsafe")
+  if is_unsafe {
+    // unsafe inductive types are not checked, as by lean4lean's replay
+    kfail("unsafe inductive types are not supported")
+  }
+  add_inductive(k, lparams, nparams, decls, is_unsafe)
+  // the declared types, constructors and recursors must be the generated ones
+  for t in types_j {
+    let n = self.name(k, t.get("name").to_int())
+    let ci = env_get(k, n)
+    match ci.kind {
+      CInduct(iv) => {
+        if not(names_eq(k, ci.lparams, self.name_list(k, t.get("levelParams")))) ||
+          iv.nparams != t.get("numParams").to_int() ||
+          iv.nindices != t.get("numIndices").to_int() ||
+          not(names_eq(k, iv.all, self.name_list(k, t.get("all")))) ||
+          not(names_eq(k, iv.ctors, self.name_list(k, t.get("ctors")))) ||
+          iv.is_rec != bool_field(k, t, "isRec") ||
+          iv.is_reflexive != bool_field(k, t, "isReflexive") ||
+          iv.nnested != t.get("numNested").to_int() {
+          kfail("invalid inductive type '\{n}'")
+        }
+      }
+      _ => kfail("invalid inductive type '\{n}'")
+    }
+  }
+  for c in ctors_j {
+    let n = self.name(k, c.get("name").to_int())
+    let ci = env_get(k, n)
+    match ci.kind {
+      CCtor(cv) =>
+        if not(names_eq(k, ci.lparams, self.name_list(k, c.get("levelParams")))) ||
+          ci.type != self.expr(k, c.get("type").to_int()) ||
+          cv.induct != self.name(k, c.get("induct").to_int()) ||
+          cv.cidx != c.get("cidx").to_int() ||
+          cv.nparams != c.get("numParams").to_int() ||
+          cv.nfields != c.get("numFields").to_int() ||
+          cv.is_unsafe != bool_field(k, c, "isUnsafe") {
+          kfail("invalid constructor '\{n}'")
+        }
+      _ => kfail("invalid constructor '\{n}'")
+    }
+  }
+  for r in recs_j {
+    let n = self.name(k, r.get("name").to_int())
+    let ci = match env_find(k, n) {
+      Some(ci) => ci
+      None => kfail("no such recursor '\{n}'")
+    }
+    let rules : Array[RecRule] = Array::new()
+    for rr in r.get("rules").to_arr() {
+      rules.push({
+        ctor: self.name(k, rr.get("ctor").to_int()),
+        nfields: rr.get("nfields").to_int(),
+        rhs: self.expr(k, rr.get("rhs").to_int()),
+      })
+    }
+    match ci.kind {
+      CRec(rv) =>
+        if not(names_eq(k, ci.lparams, self.name_list(k, r.get("levelParams")))) ||
+          ci.type != self.expr(k, r.get("type").to_int()) ||
+          not(names_eq(k, rv.all, self.name_list(k, r.get("all")))) ||
+          rv.nparams != r.get("numParams").to_int() ||
+          rv.nindices != r.get("numIndices").to_int() ||
+          rv.nmotives != r.get("numMotives").to_int() ||
+          rv.nminors != r.get("numMinors").to_int() ||
+          rv.k != bool_field(k, r, "k") ||
+          rv.is_unsafe != bool_field(k, r, "isUnsafe") ||
+          not(rules_eq(k, rv.rules, list_of_array(rules))) {
+          let given = self.expr(k, r.get("type").to_int())
+          kfail("invalid recursor '\{n}'" + (if ci.type != given {
+            "\n  generated: " + expr_to_string(k, ci.type, 40) + "\n  given:     " + expr_to_string(k, given, 40)
+          } else {
+            " (fields or rules differ)"
+          }))
+        }
+      _ => kfail("invalid recursor '\{n}'")
+    }
+  }
+}
+
+fn Tables::read_decl(self : Tables, k : K, kind : String, v : Json) -> Unit raise KernelError {
+  if kind == "axiom" {
+    add_axiom(k, 
+      self.name(k, v.get("name").to_int()),
+      self.name_list(k, v.get("levelParams")),
+      self.expr(k, v.get("type").to_int()),
+      bool_field(k, v, "isUnsafe"),
+    )
+  } else if kind == "def" {
+    add_definition(k, 
+      self.name(k, v.get("name").to_int()),
+      self.name_list(k, v.get("levelParams")),
+      self.expr(k, v.get("type").to_int()),
+      self.expr(k, v.get("value").to_int()),
+      hints_of(k, v.get("hints")),
+      safety_of(k, v.get("safety").to_str()),
+    )
+  } else if kind == "thm" {
+    add_theorem(k, 
+      self.name(k, v.get("name").to_int()),
+      self.name_list(k, v.get("levelParams")),
+      self.expr(k, v.get("type").to_int()),
+      self.expr(k, v.get("value").to_int()),
+    )
+  } else if kind == "opaque" {
+    add_opaque(k, 
+      self.name(k, v.get("name").to_int()),
+      self.name_list(k, v.get("levelParams")),
+      self.expr(k, v.get("type").to_int()),
+      self.expr(k, v.get("value").to_int()),
+      bool_field(k, v, "isUnsafe"),
+    )
+  } else if kind == "quot" {
+    check_quot_decl(k, 
+      self.name(k, v.get("name").to_int()),
+      self.name_list(k, v.get("levelParams")),
+      self.expr(k, v.get("type").to_int()),
+      quot_kind_of(k, v.get("kind").to_str()),
+    )
+  } else if kind == "inductive" {
+    self.read_inductive(k, v)
+  } else {
+    kfail("unknown declaration kind \{kind}")
+  }
+}
+
+fn Tables::read_line(self : Tables, k : K, line : String) -> Unit raise KernelError {
+  let j = parse_json(line)
+  match j.field("in") {
+    Some(i) => {
+      let idx = i.to_int()
+      let n = match j.field("str") {
+        Some(s) => mk_name_str(self.name(k, s.get("pre").to_int()), s.get("str").to_str())
+        None => {
+          let num = j.get("num")
+          let txt = match num.get("i") {
+            JNum(t) => t
+            _ => kfail("bad name number")
+          }
+          mk_name_num(self.name(k, num.get("pre").to_int()), txt)
+        }
+      }
+      set_opt(self.names, idx, n)
+      return
+    }
+    None => ()
+  }
+  match j.field("il") {
+    Some(i) => {
+      let idx = i.to_int()
+      let (kd, v) = j.kind_except("il")
+      let l = if kd == "succ" {
+        Succ(self.level(k, v.to_int()))
+      } else if kd == "max" || kd == "imax" {
+        let xs = v.to_arr()
+        let a = self.level(k, xs[0].to_int())
+        let b = self.level(k, xs[1].to_int())
+        if kd == "max" { Max(a, b) } else { IMax(a, b) }
+      } else if kd == "param" {
+        Param(self.name(k, v.to_int()))
+      } else {
+        kfail("unknown level kind \{kd}")
+      }
+      set_opt(self.levels, idx, l)
+      return
+    }
+    None => ()
+  }
+  match j.field("ie") {
+    Some(i) => {
+      let idx = i.to_int()
+      let (kd, v) = j.kind_except("ie")
+      let e = self.read_expr(k, kd, v)
+      while self.exprs.length() <= idx {
+        self.exprs.push(-1)
+      }
+      self.exprs[idx] = e
+      return
+    }
+    None => ()
+  }
+  let (kd, v) = j.kind_except("")
+  if kd == "meta" {
+    return
+  }
+  self.read_decl(k, kd, v)
+}
+
+// Replay a whole file; the number of declarations on success.
+fn replay_file(k : K, src : String) -> Int raise KernelError {
+  let t : Tables = { names: Array::new(), levels: Array::new(), exprs: Array::new() }
+  let mut start = 0
+  let mut ndecls = 0
+  let mut lineno = 0
+  for i = 0; i <= src.length(); i = i + 1 {
+    if i == src.length() || src[i] == '\n' {
+      lineno = lineno + 1
+      if i > start {
+        let line = src.substring(start, i)
+        let before = k.env.consts.length()
+        t.read_line(k, line) catch {
+          KernelError(msg) => raise KernelError("line \{lineno}: " + msg)
+        }
+        if k.env.consts.length() != before {
+          ndecls = ndecls + 1
+        }
+      }
+      start = i + 1
+    }
+  }
+  ndecls
+}

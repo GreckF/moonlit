@@ -1,0 +1,38 @@
+// moonlit: a Lean 4 kernel. Usage: main <file.ndjson>
+// Prints `ACCEPT <n>` when every declaration checks, `REJECT <reason>` otherwise.
+
+fn main {
+  let args = @env.args()
+  if args.length() < 2 {
+    println("usage: moonlit <export.ndjson>")
+    return
+  }
+  let path = args[args.length() - 1]
+  let k = K::new()
+  let src = try @fs.read_file_to_string(path) catch {
+    _ => {
+      println("ERROR cannot read \{path}")
+      return
+    }
+  }
+  let r = try replay_file(k, src) catch {
+    KernelError(msg) => {
+      println("REJECT " + msg)
+      return
+    }
+  }
+  println("ACCEPT \{r}")
+  match @env.get_env_var("MOONLIT_STATS") {
+    Some(_) => print_stats(k)
+    None => ()
+  }
+}
+
+fn print_stats(k : K) -> Unit {
+  let ns = stat_names()
+  let mut line = "STATS nodes=\{arena_size(k)} locals=\{k.lctx.decls.length()}"
+  for i = 0; i < ns.length(); i = i + 1 {
+    line = line + " " + ns[i] + "=" + k.tc.stats[i].to_string()
+  }
+  println(line)
+}
