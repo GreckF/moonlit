@@ -1,0 +1,349 @@
+// The judgments the type checker certifies its answers with.
+//
+// `Red(k, a, b)`: `a` reduces to `b` by the reduction steps of the kernel,
+// in the state `k` (the arena, the environment and the local context).
+//
+// The rules state their side conditions with the kernel's primitive
+// operations (`view`, `instantiate1`, `mk_app_n`, environment lookups, ...),
+// which are trusted: a certificate shows that an answer is justified by a
+// derivation from these rules, not that the primitives are correct. Nodes
+// are only added to the arena, except by a collection, which keeps the nodes
+// still in use; a fact `view(k, e) === v` about a node in use stays true.
+//
+// Trusted rules, to be refined: `RRec` (recursor and quotient reduction, as
+// computed by `reduce_recursor`) and `RCopy` (a collection copies the term).
+//
+// As everywhere in moonlit, the proofs are checked by MoonBit++, whose logic
+// is inconsistent: see the README.
+
+enum Red : (K, Expr, Expr) -> Prop {
+  RRefl[k : K, e : Expr] : Red(k, e, e)
+  RTrans[k : K, a : Expr, b : Expr, c : Expr](Red(k, a, b), Red(k, b, c)) : Red(k, a, c)
+  // reduce the head of an application
+  RHead[k : K, e : Expr, f : Expr](Red(k, get_app_fn(k, e), f)) : Red(k, e, mk_app_n(k, f, get_app_args(k, e)))
+  // β: the leading lambdas of the head take as many arguments as there are
+  RBeta[k : K, e : Expr](is_lam(k, get_app_fn(k, e)) === true) : Red(k, e, beta_spine(k, e))
+  // ζ
+  RZeta[k : K, e : Expr, n : Name, t : Expr, v : Expr, b : Expr](view(k, e) === VLet(n, t, v, b)) : Red(k, e, instantiate1(k, b, v))
+  // a free variable bound by a let is its value
+  RLetVar[k : K, e : Expr, id : Int, v : Expr](view(k, e) === VFVar(id), local_value(k, id) === Some(v)) : Red(k, e, v)
+  // δ: unfold the definition at the head
+  RDelta[k : K, e : Expr, r : Expr](unfold_definition(k, e) === Some(r)) : Red(k, e, r)
+  // a projection of a constructor application is its field
+  RProj[k : K, e : Expr, n : Name, i : Int, s : Expr, c : Expr, r : Expr](
+    view(k, e) === VProj(n, i, s),
+    Red(k, s, c),
+    proj_field(k, i, c) === Some(r),
+  ) : Red(k, e, r)
+  // a string literal is `String.ofList` of its characters
+  RStrLit[k : K, e : Expr, s : String](view(k, e) === VStrLit(s)) : Red(k, e, str_lit_to_ctor(k, s))
+  // `Nat.succ` of a literal
+  RNatSucc[k : K, e : Expr, f : Expr, a : Expr, la : Expr, v : Nat](
+    view(k, e) === VApp(f, a),
+    is_const_of(k, f, k.names.nat_succ) === true,
+    Red(k, a, la),
+    nat_lit_value(k, la) === Some(v),
+  ) : Red(k, e, mk_nat_lit(k, v + 1))
+  // a binary `Nat` operation of literals
+  RNatBin[k : K, e : Expr, g : Expr, b : Expr, f : Expr, a : Expr, fname : Name, ls : List[Level], la : Expr, lb : Expr, va : Nat, vb : Nat, r : Expr](
+    view(k, e) === VApp(g, b),
+    view(k, g) === VApp(f, a),
+    view(k, f) === VConst(fname, ls),
+    Red(k, a, la),
+    Red(k, b, lb),
+    nat_lit_value(k, la) === Some(va),
+    nat_lit_value(k, lb) === Some(vb),
+    nat_bin_op(k, fname, va, vb) === Some(r),
+  ) : Red(k, e, r)
+  // trusted: recursor and quotient reduction
+  RRec[k : K, e : Expr, r : Expr](rec_reduct(k, e) === Ok(Some(r))) : Red(k, e, r)
+  // trusted: a collection copies the term it keeps
+  RCopy[k : K, t : Expr, mark : Int, lmark : Int] : Red(k, t, gc_region(k, mark, lmark, t))
+}
+
+// ---- the primitives of the rules ---------------------------------------------------
+
+// β on the spine `e = f a1 .. an`: the leading lambdas of `f` take the
+// arguments, the remaining arguments are applied to the result
+fn beta_spine(k : K, e : Expr) -> Expr {
+  let args = get_app_args(k, e)
+  let mut m = 0
+  let mut body = get_app_fn(k, e)
+  while m < args.length() && is_lam(k, body) {
+    body = binding_body(k, body)
+    m = m + 1
+  }
+  mk_app_range(k, instantiate_rev(k, body, args.slice(0, m)), args, m, args.length())
+}
+
+// field `i` of a constructor application
+fn proj_field(k : K, i : Int, c : Expr) -> Expr? {
+  match const_name(k, get_app_fn(k, c)) {
+    Some(cn) =>
+      match env_find_ctor(k, cn) {
+        Some(cv) => {
+          let args = get_app_args(k, c)
+          let j = cv.nparams + i
+          if j < args.length() { Some(args[j]) } else { None }
+        }
+        None => None
+      }
+    None => None
+  }
+}
+
+// recursor and quotient reduction, with its errors as a value
+fn rec_reduct(k : K, e : Expr) -> Result[Option[Expr], KernelError] {
+  try {
+    Ok(reduce_recursor(k, e))
+  } catch {
+    KernelError(msg) => Err(KernelError(msg))
+  }
+}
+
+// ---- certified results --------------------------------------------------------------
+
+// a reduct of `e` with its derivation
+enum RedTo : (K, Expr) -> Type {
+  MkRedTo[k : K, e : Expr](r : Expr, p : Red(k, e, r)) : RedTo(k, e)
+}
+
+fn[k : K, e : Expr] RedTo::target(self : RedTo(k, e)) -> Expr {
+  match self {
+    MkRedTo(r, _) => r
+  }
+}
+
+// a cache entry: the state, the source and the reduct
+enum AnyRed {
+  MkAnyRed(k : K, src : Expr, dst : Expr, p : Red(k, src, dst))
+}
+
+fn AnyRed::dst(self : AnyRed) -> Expr {
+  match self {
+    MkAnyRed(_, _, d, _) => d
+  }
+}
+
+// the entry as a reduct of `e`, if it is one
+fn any_red_get(k : K, e : Expr, a : AnyRed) -> RedTo(k, e)? {
+  match a {
+    MkAnyRed(k2, src, dst, p) =>
+      match ptr_deq(k2, k) {
+        Proved(Refl) =>
+          match Int::deq(src, e) {
+            Yes(Refl) => Some(MkRedTo(dst, p))
+            No(_) => None
+          }
+        Unknown => None
+      }
+  }
+}
+
+lemma red_rw_src[k : K, a : Expr, b : Expr, c : Expr](e : a === b, p : Red(k, a, c)) -> Red(k, b, c) {
+  match e {
+    Refl => p
+  }
+}
+
+lemma red_rw_dst[k : K, a : Expr, b : Expr, c : Expr](e : b === c, p : Red(k, a, b)) -> Red(k, a, c) {
+  match e {
+    Refl => p
+  }
+}
+
+// ---- definitional equality ------------------------------------------------------------
+
+// two levels with the same value under every assignment
+enum LevelEqv : (Level, Level) -> Prop {
+  MkLEqv[a : Level, b : Level](LevelLE(a, b), LevelLE(b, a)) : LevelEqv(a, b)
+}
+
+enum LevelsEqv : (List[Level], List[Level]) -> Prop {
+  LsNil : LevelsEqv(Nil, Nil)
+  LsCons[a : Level, b : Level, as_ : List[Level], bs : List[Level]](LevelEqv(a, b), LevelsEqv(as_, bs)) : LevelsEqv(Cons(a, as_), Cons(b, bs))
+}
+
+// trusted: type inference, with its errors as a value
+fn infer_oracle(k : K, e : Expr) -> Result[Expr, KernelError] {
+  try {
+    Ok(infer_type(k, e))
+  } catch {
+    KernelError(msg) => Err(KernelError(msg))
+  }
+}
+
+// trusted: whether a type is a proposition
+fn prop_oracle(k : K, t : Expr) -> Result[Bool, KernelError] {
+  try {
+    Ok(is_prop(k, t))
+  } catch {
+    KernelError(msg) => Err(KernelError(msg))
+  }
+}
+
+// `t` is an inductive type with one constructor without fields or indices
+fn unit_like(k : K, t : Expr) -> Bool {
+  match const_name(k, get_app_fn(k, t)) {
+    Some(i) =>
+      match env_find_induct(k, i) {
+        Some(iv) =>
+          if iv.is_rec || iv.nindices != 0 {
+            false
+          } else {
+            match iv.ctors {
+              Cons(c, Nil) =>
+                match env_find_ctor(k, c) {
+                  Some(cv) => cv.nfields == 0
+                  None => false
+                }
+              _ => false
+            }
+          }
+        None => false
+      }
+    None => false
+  }
+}
+
+// `s` is a full application of the constructor of a non-recursive
+// structure: the structure and the number of parameters
+fn eta_struct_shape(k : K, s : Expr) -> Option[(Name, Int)] {
+  match const_name(k, get_app_fn(k, s)) {
+    Some(fname) =>
+      match env_find_ctor(k, fname) {
+        Some(cv) =>
+          if get_app_num_args(k, s) == cv.nparams + cv.nfields && is_non_rec_structure(k, cv.induct) {
+            Some((cv.induct, cv.nparams))
+          } else {
+            None
+          }
+        None => None
+      }
+    None => None
+  }
+}
+
+enum DefEq : (K, Expr, Expr) -> Prop {
+  DRefl[k : K, t : Expr] : DefEq(k, t, t)
+  DSym[k : K, a : Expr, b : Expr](DefEq(k, a, b)) : DefEq(k, b, a)
+  DTrans[k : K, a : Expr, b : Expr, c : Expr](DefEq(k, a, b), DefEq(k, b, c)) : DefEq(k, a, c)
+  // a term is equal to its reducts
+  DRed[k : K, a : Expr, b : Expr](Red(k, a, b)) : DefEq(k, a, b)
+  DSort[k : K, a : Expr, b : Expr, u : Level, v : Level](view(k, a) === VSort(u), view(k, b) === VSort(v), LevelEqv(u, v)) : DefEq(k, a, b)
+  DConst[k : K, a : Expr, b : Expr, c : Name, us : List[Level], vs : List[Level]](
+    view(k, a) === VConst(c, us),
+    view(k, b) === VConst(c, vs),
+    LevelsEqv(us, vs),
+  ) : DefEq(k, a, b)
+  DApp[k : K, a : Expr, b : Expr, f : Expr, x : Expr, g : Expr, y : Expr](
+    view(k, a) === VApp(f, x),
+    view(k, b) === VApp(g, y),
+    DefEq(k, f, g),
+    DefEq(k, x, y),
+  ) : DefEq(k, a, b)
+  // binders: equal domains, and equal bodies for a new variable of the domain
+  DLam[k : K, a : Expr, b : Expr, n1 : Name, d1 : Expr, b1 : Expr, i1 : BinderInfo, n2 : Name, d2 : Expr, b2 : Expr, i2 : BinderInfo, x : Expr, id : Int](
+    view(k, a) === VLam(n1, d1, b1, i1),
+    view(k, b) === VLam(n2, d2, b2, i2),
+    DefEq(k, d1, d2),
+    view(k, x) === VFVar(id),
+    local_type(k, id) === d2,
+    DefEq(k, instantiate1(k, b1, x), instantiate1(k, b2, x)),
+  ) : DefEq(k, a, b)
+  DPi[k : K, a : Expr, b : Expr, n1 : Name, d1 : Expr, b1 : Expr, i1 : BinderInfo, n2 : Name, d2 : Expr, b2 : Expr, i2 : BinderInfo, x : Expr, id : Int](
+    view(k, a) === VPi(n1, d1, b1, i1),
+    view(k, b) === VPi(n2, d2, b2, i2),
+    DefEq(k, d1, d2),
+    view(k, x) === VFVar(id),
+    local_type(k, id) === d2,
+    DefEq(k, instantiate1(k, b1, x), instantiate1(k, b2, x)),
+  ) : DefEq(k, a, b)
+  DProj[k : K, a : Expr, b : Expr, n1 : Name, n2 : Name, i : Int, x : Expr, y : Expr](
+    view(k, a) === VProj(n1, i, x),
+    view(k, b) === VProj(n2, i, y),
+    DefEq(k, x, y),
+  ) : DefEq(k, a, b)
+  // a projection of a term equal to a constructor application is the field
+  DProjField[k : K, a : Expr, n : Name, i : Int, x : Expr, c : Expr, r : Expr](
+    view(k, a) === VProj(n, i, x),
+    DefEq(k, x, c),
+    proj_field(k, i, c) === Some(r),
+  ) : DefEq(k, a, r)
+  // `Nat.zero` and the literal `0`, and successors
+  DNatZero[k : K, a : Expr, b : Expr](is_nat_zero(k, a) === true, is_nat_zero(k, b) === true) : DefEq(k, a, b)
+  DNatSucc[k : K, a : Expr, b : Expr, a2 : Expr, b2 : Expr](
+    is_nat_succ_of(k, a) === Some(a2),
+    is_nat_succ_of(k, b) === Some(b2),
+    DefEq(k, a2, b2),
+  ) : DefEq(k, a, b)
+  // η: a function is its η-expansion
+  DEta[k : K, s : Expr, ty0 : Expr, p : Expr, n : Name, ty : Expr, b : Expr, bi : BinderInfo](
+    infer_oracle(k, s) === Ok(ty0),
+    Red(k, ty0, p),
+    view(k, p) === VPi(n, ty, b, bi),
+  ) : DefEq(k, mk_lam(k, n, ty, mk_app(k, lift_loose_bvars(k, s, 0, 1), mk_bvar(k, 0)), bi), s)
+  // structure η: `s` is the constructor applied to the fields of `t`
+  DEtaStruct[k : K, t : Expr, s : Expr, ind : Name, np : Int, tt : Expr, st : Expr](
+    eta_struct_shape(k, s) === Some((ind, np)),
+    infer_oracle(k, t) === Ok(tt),
+    infer_oracle(k, s) === Ok(st),
+    DefEq(k, tt, st),
+    StructArgs(k, ind, t, s, np),
+  ) : DefEq(k, t, s)
+  // proof irrelevance
+  DProofIrrel[k : K, t : Expr, s : Expr, p : Expr, q : Expr](
+    infer_oracle(k, t) === Ok(p),
+    prop_oracle(k, p) === Ok(true),
+    infer_oracle(k, s) === Ok(q),
+    DefEq(k, p, q),
+  ) : DefEq(k, t, s)
+  // two terms of a unit-like type
+  DUnit[k : K, t : Expr, s : Expr, ty : Expr, tyn : Expr, sy : Expr](
+    infer_oracle(k, t) === Ok(ty),
+    Red(k, ty, tyn),
+    unit_like(k, tyn) === true,
+    infer_oracle(k, s) === Ok(sy),
+    DefEq(k, tyn, sy),
+  ) : DefEq(k, t, s)
+}
+
+// the fields of `s` (after the `np` parameters) are the projections of `t`
+enum StructArgs : (K, Name, Expr, Expr, Int) -> Prop {
+  SAParams[k : K, ind : Name, t : Expr, s : Expr, np : Int](get_app_num_args(k, s) === np) : StructArgs(k, ind, t, s, np)
+  SAField[k : K, ind : Name, t : Expr, s : Expr, np : Int, f : Expr, a : Expr](
+    view(k, s) === VApp(f, a),
+    DefEq(k, mk_proj(k, ind, get_app_num_args(k, f) - np, t), a),
+    StructArgs(k, ind, t, f, np),
+  ) : StructArgs(k, ind, t, s, np)
+}
+
+// a term equal to `e`, with the derivation
+enum EqTo : (K, Expr) -> Type {
+  MkEqTo[k : K, e : Expr](r : Expr, p : DefEq(k, e, r)) : EqTo(k, e)
+}
+
+// a union-find edge: the state, the node, its parent
+enum AnyEq {
+  MkAnyEq(k : K, src : Expr, dst : Expr, p : DefEq(k, src, dst))
+}
+
+fn AnyEq::dst(self : AnyEq) -> Expr {
+  match self {
+    MkAnyEq(_, _, d, _) => d
+  }
+}
+
+fn any_eq_get(k : K, e : Expr, a : AnyEq) -> EqTo(k, e)? {
+  match a {
+    MkAnyEq(k2, src, dst, p) =>
+      match ptr_deq(k2, k) {
+        Proved(Refl) =>
+          match Int::deq(src, e) {
+            Yes(Refl) => Some(MkEqTo(dst, p))
+            No(_) => None
+          }
+        Unknown => None
+      }
+  }
+}

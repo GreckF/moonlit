@@ -1,0 +1,794 @@
+// Definitional equality, following lean4lean's `isDefEq`, certified: every
+// `true` answer comes with a `DefEq` derivation (see `judgment.mbtpp`).
+
+// a three-valued answer: equal with a derivation, different, or undecided
+enum DCheck[P : Prop] {
+  DYes(P)
+  DNo
+  DUndef
+}
+
+lemma eq_rw_l[k : K, a : Expr, b : Expr, c : Expr](e : a === b, p : DefEq(k, a, c)) -> DefEq(k, b, c) {
+  match e {
+    Refl => p
+  }
+}
+
+lemma eq_rw_r[k : K, a : Expr, b : Expr, c : Expr](e : b === c, p : DefEq(k, a, b)) -> DefEq(k, a, c) {
+  match e {
+    Refl => p
+  }
+}
+
+// `t = tn = sn = s`
+lemma compose[k : K, t : Expr, tn : Expr, sn : Expr, s : Expr](pt : DefEq(k, t, tn), q : DefEq(k, tn, sn), ps : DefEq(k, s, sn)) -> DefEq(k, t, s) {
+  DTrans(pt, DTrans(q, DSym(ps)))
+}
+
+lemma lvl_le_refl(a : Level) -> LevelLE(a, a) {
+  MkLE(rho => le_refl(ev(a, rho)))
+}
+
+fn level_equiv_c(u : Level, v : Level) -> Check[LevelEqv(u, v)] {
+  match Level::deq(u, v) {
+    Yes(Refl) => Holds(MkLEqv(lvl_le_refl(u), lvl_le_refl(u)))
+    No(_) =>
+      match vleq(u, v) {
+        Holds(p) =>
+          match vleq(v, u) {
+            Holds(q) => Holds(MkLEqv(p, q))
+            Fail => Fail
+          }
+        Fail => Fail
+      }
+  }
+}
+
+fn levels_equiv_c(us : List[Level], vs : List[Level]) -> Check[LevelsEqv(us, vs)] {
+  match (us, vs) {
+    (Nil, Nil) => Holds(LsNil)
+    (Cons(u, us2), Cons(v, vs2)) =>
+      match level_equiv_c(u, v) {
+        Holds(p) =>
+          match levels_equiv_c(us2, vs2) {
+            Holds(q) => Holds(LsCons(p, q))
+            Fail => Fail
+          }
+        Fail => Fail
+      }
+    _ => Fail
+  }
+}
+
+// ---- the equivalence manager: union-find with derivations -------------------------
+
+fn uf_find_c(k : K, e : Expr) -> EqTo(k, e) {
+  match k.tc.uf.get(e) {
+    None => MkEqTo(e, DRefl)
+    Some(a) =>
+      match any_eq_get(k, e, a) {
+        None => MkEqTo(e, DRefl)
+        Some(MkEqTo(p, pp)) =>
+          match Int::deq(p, e) {
+            Yes(_) => MkEqTo(e, DRefl)
+            No(_) =>
+              match uf_find_c(k, p) {
+                MkEqTo(r, pr) => {
+                  let pe = DTrans(pp, pr)
+                  if r != p {
+                    // path compression
+                    k.tc.uf.set(e, MkAnyEq(k, e, r, pe))
+                    tc_log(k, C_UF, e, 0)
+                  }
+                  MkEqTo(r, pe)
+                }
+              }
+          }
+      }
+  }
+}
+
+fn uf_merge_c(k : K, a : Expr, b : Expr, p : DefEq(k, a, b)) -> Unit {
+  match uf_find_c(k, a) {
+    MkEqTo(ra, pa) =>
+      match uf_find_c(k, b) {
+        MkEqTo(rb, pb) =>
+          match Int::deq(ra, rb) {
+            Yes(_) => ()
+            No(_) => {
+              k.tc.uf.set(ra, MkAnyEq(k, ra, rb, DTrans(DSym(pa), DTrans(p, pb))))
+              tc_log(k, C_UF, ra, 0)
+            }
+          }
+      }
+  }
+}
+
+fn eqv_c(k : K, t : Expr, s : Expr) -> Check[DefEq(k, t, s)] {
+  match Int::deq(t, s) {
+    Yes(Refl) => Holds(DRefl)
+    No(_) =>
+      match uf_find_c(k, t) {
+        MkEqTo(rt, pt) =>
+          match uf_find_c(k, s) {
+            MkEqTo(rs, ps) =>
+              match Int::deq(rt, rs) {
+                Yes(Refl) => Holds(DTrans(pt, DSym(ps)))
+                No(_) => Fail
+              }
+          }
+      }
+  }
+}
+
+// ---- the entry points --------------------------------------------------------------------
+
+fn is_def_eq(k : K, t : Expr, s : Expr) -> Bool raise KernelError {
+  match is_def_eq_c(k, t, s) {
+    Holds(_) => true
+    Fail => false
+  }
+}
+
+fn is_def_eq_c(k : K, t : Expr, s : Expr) -> Check[DefEq(k, t, s)] raise KernelError {
+  let r = is_def_eq_core_c(k, t, s)
+  match r {
+    Holds(p) => uf_merge_c(k, t, s, p)
+    Fail => ()
+  }
+  r
+}
+
+fn quick_c(k : K, t : Expr, s : Expr) -> DCheck[DefEq(k, t, s)] raise KernelError {
+  match eqv_c(k, t, s) {
+    Holds(p) => return DYes(p)
+    Fail => ()
+  }
+  let kt = kind_of(k, t)
+  let ks = kind_of(k, s)
+  if (kt == K_LAM && ks == K_LAM) || (kt == K_PI && ks == K_PI) {
+    match binding_c(k, t, s) {
+      Holds(p) => DYes(p)
+      Fail => DNo
+    }
+  } else if kt == K_SORT && ks == K_SORT {
+    match (inspect(view(k, t)), inspect(view(k, s))) {
+      (MkSing(VSort(u), et), MkSing(VSort(v), es)) =>
+        match level_equiv_c(u, v) {
+          Holds(q) => DYes(DSort(et, es, q))
+          Fail => DNo
+        }
+      _ => DNo
+    }
+  } else if (kt == K_NAT && ks == K_NAT) || (kt == K_STR && ks == K_STR) {
+    // literals are interned: equal literals are the same node
+    DNo
+  } else {
+    DUndef
+  }
+}
+
+fn is_binder_of(k : K, e : Expr, kd : Int) -> Bool {
+  kind_of(k, e) == kd
+}
+
+// two lambdas, or two pis: the domains, then the bodies for a new variable
+fn binding_c(k : K, t : Expr, s : Expr) -> Check[DefEq(k, t, s)] raise KernelError {
+  let kd = kind_of(k, t)
+  match (inspect(view(k, t)), inspect(view(k, s))) {
+    (MkSing(VLam(_, d1, b1, _), et), MkSing(VLam(n2, d2, b2, _), es)) =>
+      match binder_domain_c(k, d1, d2) {
+        Holds(qd) => {
+          let x = mk_local_decl(k, n2, d2)
+          match inspect(view(k, x)) {
+            MkSing(VFVar(id), ex) =>
+              match Int::deq(local_type(k, id), d2) {
+                Yes(elt) =>
+                  match binder_body_c(k, instantiate1(k, b1, x), instantiate1(k, b2, x), kd) {
+                    Holds(q) => Holds(DLam(et, es, qd, ex, elt, q))
+                    Fail => Fail
+                  }
+                No(_) => Fail
+              }
+            MkSing(_, _) => Fail
+          }
+        }
+        Fail => Fail
+      }
+    (MkSing(VPi(_, d1, b1, _), et), MkSing(VPi(n2, d2, b2, _), es)) =>
+      match binder_domain_c(k, d1, d2) {
+        Holds(qd) => {
+          let x = mk_local_decl(k, n2, d2)
+          match inspect(view(k, x)) {
+            MkSing(VFVar(id), ex) =>
+              match Int::deq(local_type(k, id), d2) {
+                Yes(elt) =>
+                  match binder_body_c(k, instantiate1(k, b1, x), instantiate1(k, b2, x), kd) {
+                    Holds(q) => Holds(DPi(et, es, qd, ex, elt, q))
+                    Fail => Fail
+                  }
+                No(_) => Fail
+              }
+            MkSing(_, _) => Fail
+          }
+        }
+        Fail => Fail
+      }
+    _ => Fail
+  }
+}
+
+fn binder_domain_c(k : K, d1 : Expr, d2 : Expr) -> Check[DefEq(k, d1, d2)] raise KernelError {
+  match Int::deq(d1, d2) {
+    Yes(Refl) => Holds(DRefl)
+    No(_) => is_def_eq_c(k, d1, d2)
+  }
+}
+
+// the bodies: more binders of the same kind are compared the same way
+fn binder_body_c(k : K, t : Expr, s : Expr, kd : Int) -> Check[DefEq(k, t, s)] raise KernelError {
+  if is_binder_of(k, t, kd) && is_binder_of(k, s, kd) {
+    binding_c(k, t, s)
+  } else {
+    is_def_eq_c(k, t, s)
+  }
+}
+
+lemma app_fn_rw[k : K, a : Expr, fa : Expr, b : Expr, fb : Expr](
+  ea : get_app_fn(k, fa) === get_app_fn(k, a),
+  eb : get_app_fn(k, fb) === get_app_fn(k, b),
+  hp : DefEq(k, get_app_fn(k, a), get_app_fn(k, b)),
+) -> DefEq(k, get_app_fn(k, fa), get_app_fn(k, fb)) {
+  eq_rw_r(Id::sym(eb), eq_rw_l(Id::sym(ea), hp))
+}
+
+// `a` and `b` are spines with equal heads (`hp`): compare the arguments
+fn spine_c(k : K, a : Expr, b : Expr, hp : DefEq(k, get_app_fn(k, a), get_app_fn(k, b))) -> Check[DefEq(k, a, b)] raise KernelError {
+  match (inspect(view(k, a)), inspect(view(k, b))) {
+    (MkSing(VApp(fa, xa), ea), MkSing(VApp(fb, xb), eb)) =>
+      match is_def_eq_c(k, xa, xb) {
+        Holds(px) =>
+          match (Int::deq(get_app_fn(k, fa), get_app_fn(k, a)), Int::deq(get_app_fn(k, fb), get_app_fn(k, b))) {
+            (Yes(efa), Yes(efb)) =>
+              match spine_c(k, fa, fb, app_fn_rw(efa, efb, hp)) {
+                Holds(pf) => Holds(DApp(ea, eb, pf, px))
+                Fail => Fail
+              }
+            _ => Fail
+          }
+        Fail => Fail
+      }
+    (MkSing(VApp(_, _), _), _) | (_, MkSing(VApp(_, _), _)) => Fail
+    _ =>
+      // neither is an application: they are their heads
+      match (Int::deq(get_app_fn(k, a), a), Int::deq(get_app_fn(k, b), b)) {
+        (Yes(ea), Yes(eb)) => Holds(eq_rw_r(eb, eq_rw_l(ea, hp)))
+        _ => Fail
+      }
+  }
+}
+
+fn is_def_eq_app_c(k : K, t : Expr, s : Expr) -> Check[DefEq(k, t, s)] raise KernelError {
+  if not(is_app(k, t)) || not(is_app(k, s)) || get_app_num_args(k, t) != get_app_num_args(k, s) {
+    return Fail
+  }
+  match is_def_eq_c(k, get_app_fn(k, t), get_app_fn(k, s)) {
+    Holds(hp) => spine_c(k, t, s, hp)
+    Fail => Fail
+  }
+}
+
+// ---- η ------------------------------------------------------------------------------------
+
+fn eta_core_c(k : K, t : Expr, s : Expr) -> Check[DefEq(k, t, s)] raise KernelError {
+  if not(is_lam(k, t)) || is_lam(k, s) {
+    return Fail
+  }
+  match inspect(infer_oracle(k, s)) {
+    MkSing(Ok(ty0), ei) =>
+      match whnf_c(k, ty0) {
+        MkRedTo(p, pr) =>
+          match inspect(view(k, p)) {
+            MkSing(VPi(n, ty, _, bi), ev) =>
+              match is_def_eq_c(k, t, mk_lam(k, n, ty, mk_app(k, lift_loose_bvars(k, s, 0, 1), mk_bvar(k, 0)), bi)) {
+                Holds(q) => Holds(DTrans(q, DEta(ei, pr, ev)))
+                Fail => Fail
+              }
+            MkSing(_, _) => Fail
+          }
+      }
+    MkSing(Err(err), _) => raise err
+  }
+}
+
+fn eta_c(k : K, t : Expr, s : Expr) -> Check[DefEq(k, t, s)] raise KernelError {
+  match eta_core_c(k, t, s) {
+    Holds(p) => Holds(p)
+    Fail =>
+      match eta_core_c(k, s, t) {
+        Holds(p) => Holds(DSym(p))
+        Fail => Fail
+      }
+  }
+}
+
+fn struct_args_c(k : K, ind : Name, t : Expr, s : Expr, np : Int) -> Check[StructArgs(k, ind, t, s, np)] raise KernelError {
+  match Int::deq(get_app_num_args(k, s), np) {
+    Yes(e) => Holds(SAParams(e))
+    No(_) =>
+      match inspect(view(k, s)) {
+        MkSing(VApp(f, a), ev) =>
+          match struct_args_c(k, ind, t, f, np) {
+            Holds(rest) =>
+              match is_def_eq_c(k, mk_proj(k, ind, get_app_num_args(k, f) - np, t), a) {
+                Holds(q) => Holds(SAField(ev, q, rest))
+                Fail => Fail
+              }
+            Fail => Fail
+          }
+        MkSing(_, _) => Fail
+      }
+  }
+}
+
+fn eta_struct_core_c(k : K, t : Expr, s : Expr) -> Check[DefEq(k, t, s)] raise KernelError {
+  match inspect(eta_struct_shape(k, s)) {
+    MkSing(Some((ind, np)), esh) =>
+      match inspect(infer_oracle(k, t)) {
+        MkSing(Ok(tt), et) =>
+          match inspect(infer_oracle(k, s)) {
+            MkSing(Ok(st), es) =>
+              match is_def_eq_c(k, tt, st) {
+                Holds(q) =>
+                  match struct_args_c(k, ind, t, s, np) {
+                    Holds(sa) => Holds(DEtaStruct(esh, et, es, q, sa))
+                    Fail => Fail
+                  }
+                Fail => Fail
+              }
+            MkSing(Err(err), _) => raise err
+          }
+        MkSing(Err(err), _) => raise err
+      }
+    MkSing(None, _) => Fail
+  }
+}
+
+fn eta_struct_c(k : K, t : Expr, s : Expr) -> Check[DefEq(k, t, s)] raise KernelError {
+  match eta_struct_core_c(k, t, s) {
+    Holds(p) => Holds(p)
+    Fail =>
+      match eta_struct_core_c(k, s, t) {
+        Holds(p) => Holds(DSym(p))
+        Fail => Fail
+      }
+  }
+}
+
+// ---- proof irrelevance, unit-like types, literals ------------------------------------------
+
+fn proof_irrel_c(k : K, t : Expr, s : Expr) -> DCheck[DefEq(k, t, s)] raise KernelError {
+  match inspect(infer_oracle(k, t)) {
+    MkSing(Ok(p), ep) =>
+      match inspect(prop_oracle(k, p)) {
+        MkSing(Ok(true), eprop) =>
+          match inspect(infer_oracle(k, s)) {
+            MkSing(Ok(q), eq) =>
+              match is_def_eq_c(k, p, q) {
+                Holds(d) => DYes(DProofIrrel(ep, eprop, eq, d))
+                Fail => DNo
+              }
+            MkSing(Err(err), _) => raise err
+          }
+        MkSing(Ok(false), _) => DUndef
+        MkSing(Err(err), _) => raise err
+      }
+    MkSing(Err(err), _) => raise err
+  }
+}
+
+fn unit_like_c(k : K, t : Expr, s : Expr) -> Check[DefEq(k, t, s)] raise KernelError {
+  match inspect(infer_oracle(k, t)) {
+    MkSing(Ok(ty), e1) =>
+      match whnf_c(k, ty) {
+        MkRedTo(tyn, pr) =>
+          match reflect(unit_like(k, tyn)) {
+            IsTrue(h) =>
+              match inspect(infer_oracle(k, s)) {
+                MkSing(Ok(sy), e2) =>
+                  match is_def_eq_core_c(k, tyn, sy) {
+                    Holds(q) => Holds(DUnit(e1, pr, h, e2, q))
+                    Fail => Fail
+                  }
+                MkSing(Err(err), _) => raise err
+              }
+            IsFalse(_) => Fail
+          }
+      }
+    MkSing(Err(err), _) => raise err
+  }
+}
+
+fn offset_c(k : K, t : Expr, s : Expr) -> DCheck[DefEq(k, t, s)] raise KernelError {
+  match (reflect(is_nat_zero(k, t)), reflect(is_nat_zero(k, s))) {
+    (IsTrue(a), IsTrue(b)) => return DYes(DNatZero(a, b))
+    _ => ()
+  }
+  match (inspect(is_nat_succ_of(k, t)), inspect(is_nat_succ_of(k, s))) {
+    (MkSing(Some(t2), a), MkSing(Some(s2), b)) =>
+      match is_def_eq_core_c(k, t2, s2) {
+        Holds(q) => DYes(DNatSucc(a, b, q))
+        Fail => DNo
+      }
+    _ => DUndef
+  }
+}
+
+fn string_lit_core_c(k : K, t : Expr, s : Expr) -> DCheck[DefEq(k, t, s)] raise KernelError {
+  match inspect(view(k, t)) {
+    MkSing(VStrLit(str), et) =>
+      if is_app(k, s) && is_const_of(k, app_fn(k, s), k.names.string_of_list) {
+        match is_def_eq_core_c(k, str_lit_to_ctor(k, str), s) {
+          Holds(q) => DYes(DTrans(DRed(RStrLit(et)), q))
+          Fail => DNo
+        }
+      } else {
+        DUndef
+      }
+    MkSing(_, _) => DUndef
+  }
+}
+
+fn string_lit_c(k : K, t : Expr, s : Expr) -> DCheck[DefEq(k, t, s)] raise KernelError {
+  match string_lit_core_c(k, t, s) {
+    DUndef =>
+      match string_lit_core_c(k, s, t) {
+        DYes(p) => DYes(DSym(p))
+        DNo => DNo
+        DUndef => DUndef
+      }
+    r => r
+  }
+}
+
+// ---- lazy δ-reduction ---------------------------------------------------------------------
+
+// the state of lazy δ-reduction on `t =?= s`: the current terms `tn`, `sn`,
+// equal to `t` and `s`
+enum Lazy : (K, Expr, Expr) -> Type {
+  LzCont[k : K, t : Expr, s : Expr](tn : Expr, sn : Expr, pt : DefEq(k, t, tn), ps : DefEq(k, s, sn)) : Lazy(k, t, s)
+  LzUnknown[k : K, t : Expr, s : Expr](tn : Expr, sn : Expr, pt : DefEq(k, t, tn), ps : DefEq(k, s, sn)) : Lazy(k, t, s)
+  LzFalse[k : K, t : Expr, s : Expr](tn : Expr, sn : Expr, pt : DefEq(k, t, tn), ps : DefEq(k, s, sn)) : Lazy(k, t, s)
+  LzTrue[k : K, t : Expr, s : Expr](p : DefEq(k, t, s)) : Lazy(k, t, s)
+}
+
+fn delta_step_c(k : K, e : Expr) -> RedTo(k, e) raise KernelError {
+  match inspect(unfold_definition(k, e)) {
+    MkSing(Some(r), ed) =>
+      match whnf_core_pc(k, r, true) {
+        MkRedTo(r2, p) => MkRedTo(r2, RTrans(RDelta(ed), p))
+      }
+    MkSing(None, _) => kfail("internal: delta on a non-definition")
+  }
+}
+
+fn unfold_proj_app_c(k : K, e : Expr) -> RedTo(k, e)? raise KernelError {
+  if kind_of(k, get_app_fn(k, e)) != K_PROJ {
+    return None
+  }
+  match whnf_core_pc(k, e, false) {
+    MkRedTo(e2, p) => if e2 != e { Some(MkRedTo(e2, p)) } else { None }
+  }
+}
+
+fn lazy_cont_c(k : K, t : Expr, s : Expr, tn : Expr, sn : Expr, pt : DefEq(k, t, tn), ps : DefEq(k, s, sn)) -> Lazy(k, t, s) raise KernelError {
+  match quick_c(k, tn, sn) {
+    DUndef => LzCont(tn, sn, pt, ps)
+    DYes(q) => LzTrue(compose(pt, q, ps))
+    DNo => LzFalse(tn, sn, pt, ps)
+  }
+}
+
+// one step: unfold the side with the greater definitional height (both when
+// they are the same); for two applications of the same definition, first
+// try comparing the arguments
+fn lazy_step_c(k : K, t : Expr, s : Expr, tn : Expr, sn : Expr, pt : DefEq(k, t, tn), ps : DefEq(k, s, sn)) -> Lazy(k, t, s) raise KernelError {
+  let dt = is_delta(k, tn)
+  let ds = is_delta(k, sn)
+  match (dt, ds) {
+    (None, None) => LzUnknown(tn, sn, pt, ps)
+    (Some(_), None) =>
+      match unfold_proj_app_c(k, sn) {
+        Some(MkRedTo(sn2, p)) => lazy_cont_c(k, t, s, tn, sn2, pt, DTrans(ps, DRed(p)))
+        None =>
+          match delta_step_c(k, tn) {
+            MkRedTo(tn2, p) => lazy_cont_c(k, t, s, tn2, sn, DTrans(pt, DRed(p)), ps)
+          }
+      }
+    (None, Some(_)) =>
+      match unfold_proj_app_c(k, tn) {
+        Some(MkRedTo(tn2, p)) => lazy_cont_c(k, t, s, tn2, sn, DTrans(pt, DRed(p)), ps)
+        None =>
+          match delta_step_c(k, sn) {
+            MkRedTo(sn2, p) => lazy_cont_c(k, t, s, tn, sn2, pt, DTrans(ps, DRed(p)))
+          }
+      }
+    (Some(ct), Some(cs)) => {
+      let ht = ct.hints(k)
+      let hs = cs.hints(k)
+      if hints_lt(ht, hs) {
+        match delta_step_c(k, sn) {
+          MkRedTo(sn2, p) => lazy_cont_c(k, t, s, tn, sn2, pt, DTrans(ps, DRed(p)))
+        }
+      } else if hints_lt(hs, ht) {
+        match delta_step_c(k, tn) {
+          MkRedTo(tn2, p) => lazy_cont_c(k, t, s, tn2, sn, DTrans(pt, DRed(p)), ps)
+        }
+      } else {
+        if is_app(k, tn) && is_app(k, sn) && ct.name == cs.name && hints_is_regular(ht) &&
+          not(k.tc.failure.contains(failure_key(k, tn, sn))) {
+          match same_const_args_c(k, tn, sn) {
+            Holds(q) => return LzTrue(compose(pt, q, ps))
+            Fail => ()
+          }
+          let fk = failure_key(k, tn, sn)
+          k.tc.failure.set(fk, true)
+          tc_log(k, C_FAILURE, fk.0, fk.1)
+        }
+        match delta_step_c(k, tn) {
+          MkRedTo(tn2, p1) =>
+            match delta_step_c(k, sn) {
+              MkRedTo(sn2, p2) => lazy_cont_c(k, t, s, tn2, sn2, DTrans(pt, DRed(p1)), DTrans(ps, DRed(p2)))
+            }
+        }
+      }
+    }
+  }
+}
+
+// two applications of the same constant: equivalent levels, equal arguments
+fn same_const_args_c(k : K, tn : Expr, sn : Expr) -> Check[DefEq(k, tn, sn)] raise KernelError {
+  match (inspect(view(k, get_app_fn(k, tn))), inspect(view(k, get_app_fn(k, sn)))) {
+    (MkSing(VConst(c1, us), e1), MkSing(VConst(c2, vs), e2)) =>
+      match Name::deq(c1, c2) {
+        Yes(Refl) =>
+          match levels_equiv_c(us, vs) {
+            Holds(lq) => spine_c(k, tn, sn, DConst(e1, e2, lq))
+            Fail => Fail
+          }
+        No(_) => Fail
+      }
+    _ => Fail
+  }
+}
+
+fn failure_key(k : K, t : Expr, s : Expr) -> (Int, Int) {
+  ignore(k)
+  if t <= s { (t, s) } else { (s, t) }
+}
+
+fn lazy_c(k : K, t : Expr, s : Expr, tn0 : Expr, sn0 : Expr, pt0 : DefEq(k, t, tn0), ps0 : DefEq(k, s, sn0)) -> Lazy(k, t, s) raise KernelError {
+  let mut cur : Lazy(k, t, s) = LzCont(tn0, sn0, pt0, ps0)
+  let mut fuel = LAZY_FUEL
+  while true {
+    if fuel <= 0 {
+      kfail("deterministic timeout (lazy delta)")
+    }
+    fuel = fuel - 1
+    let next : Lazy(k, t, s) = match cur {
+      LzCont(tn, sn, pt, ps) => {
+        match offset_c(k, tn, sn) {
+          DYes(q) => return LzTrue(compose(pt, q, ps))
+          DNo => return LzFalse(tn, sn, pt, ps)
+          DUndef => ()
+        }
+        if (not(has_fvar(k, tn)) && not(has_fvar(k, sn))) || k.tc.eager {
+          match reduce_nat_c(k, tn) {
+            Some(MkRedTo(t2, pr)) =>
+              return match is_def_eq_core_c(k, t2, sn) {
+                Holds(q) => LzTrue(compose(DTrans(pt, DRed(pr)), q, ps))
+                Fail => LzFalse(t2, sn, DTrans(pt, DRed(pr)), ps)
+              }
+            None =>
+              match reduce_nat_c(k, sn) {
+                Some(MkRedTo(s2, pr)) =>
+                  return match is_def_eq_core_c(k, tn, s2) {
+                    Holds(q) => LzTrue(compose(pt, q, DTrans(ps, DRed(pr))))
+                    Fail => LzFalse(tn, s2, pt, DTrans(ps, DRed(pr)))
+                  }
+                None => ()
+              }
+          }
+        }
+        lazy_step_c(k, t, s, tn, sn, pt, ps)
+      }
+      r => return r
+    }
+    match next {
+      LzCont(_, _, _, _) => cur = next
+      r => return r
+    }
+  }
+  cur
+}
+
+// field `idx` of a term equal to `c` (a constructor application or a
+// string literal)
+fn proj_field_eq_c(k : K, c : Expr, idx : Int) -> EqTo(k, c)? raise KernelError {
+  ignore(idx)
+  match inspect(view(k, c)) {
+    MkSing(VStrLit(str), ev) =>
+      match whnf_c(k, str_lit_to_ctor(k, str)) {
+        MkRedTo(c2, p) => Some(MkEqTo(c2, DRed(RTrans(RStrLit(ev), p))))
+      }
+    MkSing(_, _) => Some(MkEqTo(c, DRefl))
+  }
+}
+
+// `t = proj idx te`, `s = proj idx se`: lazily unfold the structures, then
+// compare the fields, or the structures
+fn lazy_proj_c(
+  k : K,
+  t : Expr,
+  s : Expr,
+  n1 : Name,
+  n2 : Name,
+  idx : Int,
+  te : Expr,
+  se : Expr,
+  et : view(k, t) === VProj(n1, idx, te),
+  es : view(k, s) === VProj(n2, idx, se),
+) -> Check[DefEq(k, t, s)] raise KernelError {
+  let mut cur : Lazy(k, te, se) = LzCont(te, se, DRefl, DRefl)
+  let mut fuel = LAZY_FUEL
+  while true {
+    if fuel <= 0 {
+      kfail("deterministic timeout (lazy delta proj)")
+    }
+    fuel = fuel - 1
+    match cur {
+      LzCont(tn, sn, pt, ps) =>
+        match lazy_step_c(k, te, se, tn, sn, pt, ps) {
+          LzCont(t2, s2, p2, q2) => cur = LzCont(t2, s2, p2, q2)
+          r => {
+            cur = r
+            break
+          }
+        }
+      _ => break
+    }
+  }
+  match cur {
+    LzTrue(q) => Holds(DProj(et, es, q))
+    LzCont(tn, sn, pt, ps) | LzUnknown(tn, sn, pt, ps) | LzFalse(tn, sn, pt, ps) => {
+      // the fields, if both structures are constructor applications
+      let fields = match (proj_field_eq_c(k, tn, idx), proj_field_eq_c(k, sn, idx)) {
+        (Some(MkEqTo(tc, qt)), Some(MkEqTo(sc, qs))) =>
+          match (inspect(proj_field(k, idx, tc)), inspect(proj_field(k, idx, sc))) {
+            (MkSing(Some(tf), eft), MkSing(Some(sf), efs)) =>
+              Some(
+                match is_def_eq_core_c(k, tf, sf) {
+                  Holds(q) => Holds(compose(DProjField(et, DTrans(pt, qt), eft), q, DProjField(es, DTrans(ps, qs), efs)))
+                  Fail => Fail
+                },
+              )
+            _ => None
+          }
+        _ => None
+      }
+      match fields {
+        Some(r) => r
+        None =>
+          match is_def_eq_core_c(k, tn, sn) {
+            Holds(q) => Holds(DProj(et, es, compose(pt, q, ps)))
+            Fail => Fail
+          }
+      }
+    }
+  }
+}
+
+// ---- the main algorithm -------------------------------------------------------------------
+
+fn is_def_eq_core_c(k : K, t : Expr, s : Expr) -> Check[DefEq(k, t, s)] raise KernelError {
+  bump(k, ST_DEFEQ)
+  match quick_c(k, t, s) {
+    DYes(p) => return Holds(p)
+    DNo => return Fail
+    DUndef => ()
+  }
+  // `t =?= true` for a closed `t`: evaluate it
+  if (not(has_fvar(k, t)) || k.tc.eager) && is_const_of(k, s, k.names.bool_true) {
+    match whnf_c(k, t) {
+      MkRedTo(w, pw) =>
+        match Int::deq(w, s) {
+          Yes(Refl) => return Holds(DRed(pw))
+          No(_) => ()
+        }
+    }
+  }
+  match (whnf_core_pc(k, t, true), whnf_core_pc(k, s, true)) {
+    (MkRedTo(tn, rt), MkRedTo(sn, rs)) => {
+      let pt : DefEq(k, t, tn) = DRed(rt)
+      let ps : DefEq(k, s, sn) = DRed(rs)
+      if tn != t || sn != s {
+        match quick_c(k, tn, sn) {
+          DYes(q) => return Holds(compose(pt, q, ps))
+          DNo => return Fail
+          DUndef => ()
+        }
+      }
+      match proof_irrel_c(k, tn, sn) {
+        DYes(q) => return Holds(compose(pt, q, ps))
+        DNo => return Fail
+        DUndef => ()
+      }
+      match lazy_c(k, t, s, tn, sn, pt, ps) {
+        LzTrue(p) => Holds(p)
+        LzFalse(_, _, _, _) => Fail
+        LzCont(tn2, sn2, pt2, ps2) | LzUnknown(tn2, sn2, pt2, ps2) => after_lazy_c(k, t, s, tn2, sn2, pt2, ps2)
+      }
+    }
+  }
+}
+
+// after lazy δ-reduction: no definition left to unfold at the heads
+fn after_lazy_c(k : K, t : Expr, s : Expr, tn : Expr, sn : Expr, pt : DefEq(k, t, tn), ps : DefEq(k, s, sn)) -> Check[DefEq(k, t, s)] raise KernelError {
+  match (inspect(view(k, tn)), inspect(view(k, sn))) {
+    (MkSing(VConst(tf, tl), et), MkSing(VConst(sf, sl), es)) =>
+      match Name::deq(tf, sf) {
+        Yes(Refl) =>
+          match levels_equiv_c(tl, sl) {
+            Holds(lq) => return Holds(compose(pt, DConst(et, es, lq), ps))
+            Fail => ()
+          }
+        No(_) => ()
+      }
+    (MkSing(VFVar(_), _), MkSing(VFVar(_), _)) =>
+      match Int::deq(tn, sn) {
+        Yes(Refl) => return Holds(compose(pt, DRefl, ps))
+        No(_) => ()
+      }
+    (MkSing(VProj(n1, ti, te), et), MkSing(VProj(n2, si, se), es)) =>
+      match Int::deq(ti, si) {
+        Yes(Refl) =>
+          match lazy_proj_c(k, tn, sn, n1, n2, ti, te, se, et, es) {
+            Holds(q) => return Holds(compose(pt, q, ps))
+            Fail => ()
+          }
+        No(_) => ()
+      }
+    _ => ()
+  }
+  // the previous steps reduced projections lazily: the full weak head normal form
+  match (whnf_core_pc(k, tn, false), whnf_core_pc(k, sn, false)) {
+    (MkRedTo(tnn, rt), MkRedTo(snn, rs)) =>
+      if tnn != tn || snn != sn {
+        return match is_def_eq_core_c(k, tnn, snn) {
+          Holds(q) => Holds(compose(DTrans(pt, DRed(rt)), q, DTrans(ps, DRed(rs))))
+          Fail => Fail
+        }
+      }
+  }
+  match is_def_eq_app_c(k, tn, sn) {
+    Holds(q) => return Holds(compose(pt, q, ps))
+    Fail => ()
+  }
+  match eta_c(k, tn, sn) {
+    Holds(q) => return Holds(compose(pt, q, ps))
+    Fail => ()
+  }
+  match eta_struct_c(k, tn, sn) {
+    Holds(q) => return Holds(compose(pt, q, ps))
+    Fail => ()
+  }
+  match string_lit_c(k, tn, sn) {
+    DYes(q) => return Holds(compose(pt, q, ps))
+    DNo => return Fail
+    DUndef => ()
+  }
+  match unit_like_c(k, tn, sn) {
+    Holds(q) => Holds(compose(pt, q, ps))
+    Fail => Fail
+  }
+}

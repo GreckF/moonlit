@@ -400,7 +400,7 @@ fn flatten_max(a : Level, b : Level, k : Nat, acc : List[Ent]) -> Flat(Max(a, b)
 // a semi-decision: a proof, or nothing (the procedure is sound; completeness
 // is not proved)
 enum Check[P : Prop] {
-  Ok(P)
+  Holds(P)
   Fail
 }
 
@@ -435,19 +435,19 @@ fn ent_le(e : Ent, f : Ent) -> Check[EntLe(e, f)] {
   match (e, f) {
     (EConst(c), EConst(d)) =>
       match nat_le_dec(c, d) {
-        Yes(h) => Ok(MkEntLe(_ => h))
+        Yes(h) => Holds(MkEntLe(_ => h))
         No(_) => Fail
       }
     (EConst(c), EVar(q, d)) =>
       match nat_le_dec(c, d) {
-        Yes(h) => Ok(MkEntLe(rho => le_trans(h, k_le_addk(rho(q), d))))
+        Yes(h) => Holds(MkEntLe(rho => le_trans(h, k_le_addk(rho(q), d))))
         No(_) => Fail
       }
     (EVar(p, k), EVar(q, d)) =>
       match Name::deq(p, q) {
         Yes(Refl) =>
           match nat_le_dec(k, d) {
-            Yes(h) => Ok(MkEntLe(rho => addk_mono_r(rho(p), h)))
+            Yes(h) => Holds(MkEntLe(rho => addk_mono_r(rho(p), h)))
             No(_) => Fail
           }
         No(_) => Fail
@@ -473,10 +473,10 @@ fn dominated(e : Ent, es : List[Ent]) -> Check[Bound(e, es)] {
     Nil => Fail
     Cons(f, rest) =>
       match ent_le(e, f) {
-        Ok(p) => Ok(bound_here(p))
+        Holds(p) => Holds(bound_here(p))
         Fail =>
           match dominated(e, rest) {
-            Ok(p) => Ok(bound_there(p))
+            Holds(p) => Holds(bound_there(p))
             Fail => Fail
           }
       }
@@ -498,12 +498,12 @@ lemma lbound_cons[e : Ent, r : List[Ent], b : List[Ent]](p : Bound(e, b), q : LB
 
 fn all_bounded(a : List[Ent], b : List[Ent]) -> Check[LBound(a, b)] {
   match a {
-    Nil => Ok(lbound_nil(b))
+    Nil => Holds(lbound_nil(b))
     Cons(e, r) =>
       match dominated(e, b) {
-        Ok(p) =>
+        Holds(p) =>
           match all_bounded(r, b) {
-            Ok(q) => Ok(lbound_cons(p, q))
+            Holds(q) => Holds(lbound_cons(p, q))
             Fail => Fail
           }
         Fail => Fail
@@ -529,7 +529,7 @@ fn flat_cmp(a : Level, b : Level) -> Check[LevelLE(a, b)] {
       match flatten(b, Z, Nil) {
         Some(MkFlat(rb, _, _, lb)) =>
           match all_bounded(ra, rb) {
-            Ok(q) => Ok(le_of_flats(ua, lb, q))
+            Holds(q) => Holds(le_of_flats(ua, lb, q))
             Fail => Fail
           }
         None => Fail
@@ -686,9 +686,9 @@ fn vleq_split(a : Level, b : Level, ps : List[Name]) -> Check[LevelLE(a, b)] {
     Cons(p, rest) => {
       let sp = Succ(Param(p))
       match vleq_split(subst(a, p, Zero), subst(b, p, Zero), rest) {
-        Ok(h0) =>
+        Holds(h0) =>
           match vleq_split(subst(a, p, sp), subst(b, p, sp), rest) {
-            Ok(h1) => Ok(split_le(p, h0, h1))
+            Holds(h1) => Holds(split_le(p, h0, h1))
             Fail => Fail
           }
         Fail => Fail
@@ -716,7 +716,7 @@ fn level_leq(a : Level, b : Level) -> Bool {
     None => ()
   }
   let r = match vleq(a, b) {
-    Ok(_) => true
+    Holds(_) => true
     Fail => false
   }
   level_leq_cache.set((a, b), r)
@@ -764,19 +764,19 @@ lemma nz_imax[a : Level, b : Level](p : NeverZero(b)) -> NeverZero(IMax(a, b)) {
 fn never_zero(l : Level) -> Check[NeverZero(l)] {
   match l {
     Zero => Fail
-    Succ(u) => Ok(MkNZ(rho => LeS(LeZ)))
+    Succ(u) => Holds(MkNZ(rho => LeS(LeZ)))
     Max(a, b) =>
       match never_zero(a) {
-        Ok(p) => Ok(nz_max_l(p))
+        Holds(p) => Holds(nz_max_l(p))
         Fail =>
           match never_zero(b) {
-            Ok(p) => Ok(nz_max_r(p))
+            Holds(p) => Holds(nz_max_r(p))
             Fail => Fail
           }
       }
     IMax(_, b) =>
       match never_zero(b) {
-        Ok(p) => Ok(nz_imax(p))
+        Holds(p) => Holds(nz_imax(p))
         Fail => Fail
       }
     Param(_) => Fail
@@ -801,20 +801,20 @@ lemma az_imax[a : Level, b : Level](q : AlwaysZero(b)) -> AlwaysZero(IMax(a, b))
 // Lean's syntactic test: zero under every assignment
 fn always_zero(l : Level) -> Check[AlwaysZero(l)] {
   match l {
-    Zero => Ok(MkAZ(rho => Refl))
+    Zero => Holds(MkAZ(rho => Refl))
     Succ(_) => Fail
     Max(a, b) =>
       match always_zero(a) {
-        Ok(p) =>
+        Holds(p) =>
           match always_zero(b) {
-            Ok(q) => Ok(az_max(p, q))
+            Holds(q) => Holds(az_max(p, q))
             Fail => Fail
           }
         Fail => Fail
       }
     IMax(_, b) =>
       match always_zero(b) {
-        Ok(q) => Ok(az_imax(q))
+        Holds(q) => Holds(az_imax(q))
         Fail => Fail
       }
     Param(_) => Fail
@@ -823,14 +823,14 @@ fn always_zero(l : Level) -> Check[AlwaysZero(l)] {
 
 fn Level::is_never_zero(self : Level) -> Bool {
   match never_zero(self) {
-    Ok(_) => true
+    Holds(_) => true
     Fail => false
   }
 }
 
 fn Level::is_always_zero(self : Level) -> Bool {
   match always_zero(self) {
-    Ok(_) => true
+    Holds(_) => true
     Fail => false
   }
 }
@@ -957,10 +957,10 @@ lemma sv_max_same(a : Level) -> SameVal(a, Max(a, a)) {
 // Lean's `mkLevelMax'`
 fn mk_max_c(a : Level, b : Level) -> Simp(Max(a, b)) {
   match always_zero(a) {
-    Ok(p) => MkSimp(b, sv_max_zl(p))
+    Holds(p) => MkSimp(b, sv_max_zl(p))
     Fail =>
       match always_zero(b) {
-        Ok(q) => MkSimp(a, sv_max_zr(q))
+        Holds(q) => MkSimp(a, sv_max_zr(q))
         Fail =>
           match Level::deq(a, b) {
             Yes(Refl) => MkSimp(a, sv_max_same(a))
@@ -1000,16 +1000,16 @@ lemma sv_imax_same(a : Level) -> SameVal(a, IMax(a, a)) {
 // Lean's `mkLevelIMax'`
 fn mk_imax_c(a : Level, b : Level) -> Simp(IMax(a, b)) {
   match never_zero(b) {
-    Ok(q) =>
+    Holds(q) =>
       match mk_max_c(a, b) {
         MkSimp(l, p) => MkSimp(l, sv_trans(p, sv_imax_nz(q)))
       }
     Fail =>
       match always_zero(b) {
-        Ok(q) => MkSimp(b, sv_imax_zr(q))
+        Holds(q) => MkSimp(b, sv_imax_zr(q))
         Fail =>
           match always_zero(a) {
-            Ok(p) => MkSimp(b, sv_imax_zl(p))
+            Holds(p) => MkSimp(b, sv_imax_zl(p))
             Fail =>
               match Level::deq(a, Succ(Zero)) {
                 Yes(Refl) => MkSimp(b, sv_imax_one(b))

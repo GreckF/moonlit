@@ -4,11 +4,11 @@
 struct Tc {
   mut infer_i : HashMap[Int, Expr]
   mut infer_c : HashMap[Int, Expr]
-  mut whnf_core_c : HashMap[Int, Expr]
-  mut whnf_c : HashMap[Int, Expr]
+  mut whnf_core_c : HashMap[Int, AnyRed]
+  mut whnf_c : HashMap[Int, AnyRed]
   mut failure : HashMap[(Int, Int), Bool]
   // union-find over expressions known to be definitionally equal
-  mut uf : HashMap[Int, Int]
+  mut uf : HashMap[Int, AnyEq]
   // values of constants (`c.{ls}` as a node) with the levels substituted, and
   // recursor rules (`rec.{ls}` node, rule index): these depend only on the
   // environment, so they are kept across declarations
@@ -52,12 +52,6 @@ fn cache_of(k : K, c : Int) -> HashMap[Int, Expr] {
     k.tc.infer_i
   } else if c == C_INFER_C {
     k.tc.infer_c
-  } else if c == C_WHNF_CORE {
-    k.tc.whnf_core_c
-  } else if c == C_WHNF {
-    k.tc.whnf_c
-  } else if c == C_UF {
-    k.tc.uf
   } else {
     k.tc.unfold_c
   }
@@ -77,6 +71,29 @@ fn tc_purge(k : K, mark : Int, lmark : Int) -> Unit {
         false
       } else {
         true
+      }
+    } else if c == C_UF {
+      match t.uf.get(x) {
+        Some(a) =>
+          if x >= mark || a.dst() >= mark {
+            t.uf.remove(x)
+            false
+          } else {
+            true
+          }
+        None => false
+      }
+    } else if c == C_WHNF_CORE || c == C_WHNF {
+      let m = if c == C_WHNF { t.whnf_c } else { t.whnf_core_c }
+      match m.get(x) {
+        Some(a) =>
+          if x >= mark || a.dst() >= mark {
+            m.remove(x)
+            false
+          } else {
+            true
+          }
+        None => false
       }
     } else if c == C_RULE {
       match t.rule_c.get((x, y)) {
@@ -173,43 +190,7 @@ const WHNF_FUEL : Int = 1000000
 
 const LAZY_FUEL : Int = 1000000
 
-// ---- equivalence manager ------------------------------------------------------------
-
-fn uf_find(k : K, e : Int) -> Int {
-  let mut r = e
-  while true {
-    match k.tc.uf.get(r) {
-      Some(p) => if p == r { break } else { r = p }
-      None => break
-    }
-  }
-  // path compression
-  let mut c = e
-  while c != r {
-    match k.tc.uf.get(c) {
-      Some(p) => {
-        k.tc.uf.set(c, r)
-        tc_log(k, C_UF, c, 0)
-        c = p
-      }
-      None => break
-    }
-  }
-  r
-}
-
-fn uf_merge(k : K, a : Int, b : Int) -> Unit {
-  let ra = uf_find(k, a)
-  let rb = uf_find(k, b)
-  if ra != rb {
-    k.tc.uf.set(ra, rb)
-    tc_log(k, C_UF, ra, 0)
-  }
-}
-
-fn eqv_is_equiv(k : K, a : Expr, b : Expr) -> Bool {
-  a == b || uf_find(k, a) == uf_find(k, b)
-}
+// the equivalence manager (union-find) is in `defeq.mbtpp`
 
 // ---- basic helpers ---------------------------------------------------------------------
 
@@ -526,69 +507,116 @@ fn is_let_fvar(k : K, e : Expr) -> Bool {
 }
 
 fn whnf_core(k : K, e : Expr) -> Expr raise KernelError {
-  whnf_core_p(k, e, false)
+  whnf_core_pc(k, e, false).target()
 }
 
 fn whnf_core_p(k : K, e : Expr, cheap_proj : Bool) -> Expr raise KernelError {
+  whnf_core_pc(k, e, cheap_proj).target()
+}
+
+lemma head_is_lam[k : K, e : Expr, f0 : Expr](ef0 : get_app_fn(k, e) === f0, h : is_lam(k, f0) === true) -> is_lam(k, get_app_fn(k, e)) === true {
+  match ef0 {
+    Refl => h
+  }
+}
+
+// weak head normalization without unfolding definitions, with its derivation
+fn whnf_core_pc(k : K, e : Expr, cheap_proj : Bool) -> RedTo(k, e) raise KernelError {
   let kd = kind_of(k, e)
   if kd == K_BVAR || kd == K_SORT || kd == K_PI || kd == K_CONST || kd == K_LAM || kd == K_NAT || kd == K_STR {
-    return e
+    return MkRedTo(e, RRefl)
   }
   if kd == K_FVAR && not(is_let_fvar(k, e)) {
-    return e
+    return MkRedTo(e, RRefl)
   }
   match k.tc.whnf_core_c.get(e) {
-    Some(r) => return r
+    Some(a) =>
+      match any_red_get(k, e, a) {
+        Some(r) => return r
+        None => ()
+      }
     None => ()
   }
-  let r = if kd == K_FVAR {
-    match local_value(k, fvar_id(k, e)) {
-      Some(v) => whnf_core_p(k, v, cheap_proj)
-      None => e
+  let res : RedTo(k, e) = if kd == K_FVAR {
+    match inspect(view(k, e)) {
+      MkSing(VFVar(id), ev) =>
+        match inspect(local_value(k, id)) {
+          MkSing(Some(v), elv) =>
+            match whnf_core_pc(k, v, cheap_proj) {
+              MkRedTo(r, p) => MkRedTo(r, RTrans(RLetVar(ev, elv), p))
+            }
+          MkSing(None, _) => MkRedTo(e, RRefl)
+        }
+      MkSing(_, _) => MkRedTo(e, RRefl)
     }
   } else if kd == K_APP {
-    let f0 = get_app_fn(k, e)
-    let f = whnf_core_p(k, f0, cheap_proj)
-    if is_lam(k, f) {
-      let args = get_app_args(k, e)
-      let mut m = 0
-      let mut body = f
-      while m < args.length() && is_lam(k, body) {
-        body = binding_body(k, body)
-        m = m + 1
-      }
-      bump(k, ST_BETA)
-      let r = mk_app_range(k, instantiate_rev(k, body, args.slice(0, m)), args, m, args.length())
-      whnf_core_p(k, r, cheap_proj)
-    } else if f == f0 {
-      match reduce_recursor(k, e) {
-        Some(r) => whnf_core_p(k, r, cheap_proj)
-        None => e
-      }
-    } else {
-      let r = mk_app_n(k, f, get_app_args(k, e))
-      whnf_core_p(k, r, cheap_proj)
-    }
+    whnf_app_c(k, e, cheap_proj)
   } else if kd == K_LET {
-    match view(k, e) {
-      VLet(_, _, v, b) => whnf_core_p(k, instantiate1(k, b, v), cheap_proj)
-      _ => e
+    match inspect(view(k, e)) {
+      MkSing(VLet(_, _, v, b), ev) =>
+        match whnf_core_pc(k, instantiate1(k, b, v), cheap_proj) {
+          MkRedTo(r, p) => MkRedTo(r, RTrans(RZeta(ev), p))
+        }
+      MkSing(_, _) => MkRedTo(e, RRefl)
     }
   } else {
-    match view(k, e) {
-      VProj(_, idx, s) =>
-        match reduce_proj(k, idx, s, cheap_proj) {
-          Some(m) => whnf_core_p(k, m, cheap_proj)
-          None => e
+    match inspect(view(k, e)) {
+      MkSing(VProj(_, idx, s), ev) =>
+        match reduce_proj_c(k, idx, s, cheap_proj) {
+          Some(MkProjRes(_, ps, m, em)) =>
+            match whnf_core_pc(k, m, cheap_proj) {
+              MkRedTo(r, p) => MkRedTo(r, RTrans(RProj(ev, ps, em), p))
+            }
+          None => MkRedTo(e, RRefl)
         }
-      _ => e
+      MkSing(_, _) => MkRedTo(e, RRefl)
     }
   }
   if not(cheap_proj) {
-    k.tc.whnf_core_c.set(e, r)
-    tc_log(k, C_WHNF_CORE, e, 0)
+    match res {
+      MkRedTo(t, p) => {
+        k.tc.whnf_core_c.set(e, MkAnyRed(k, e, t, p))
+        tc_log(k, C_WHNF_CORE, e, 0)
+      }
+    }
   }
-  r
+  res
+}
+
+// an application: reduce the head, then β or a recursor
+fn whnf_app_c(k : K, e : Expr, cheap_proj : Bool) -> RedTo(k, e) raise KernelError {
+  match inspect(get_app_fn(k, e)) {
+    MkSing(f0, ef0) =>
+      match whnf_core_pc(k, f0, cheap_proj) {
+        MkRedTo(f, pf) =>
+          match Int::deq(f, f0) {
+            Yes(Refl) =>
+              match reflect(is_lam(k, f0)) {
+                IsTrue(h) => {
+                  bump(k, ST_BETA)
+                  match whnf_core_pc(k, beta_spine(k, e), cheap_proj) {
+                    MkRedTo(r, p) => MkRedTo(r, RTrans(RBeta(head_is_lam(ef0, h)), p))
+                  }
+                }
+                IsFalse(_) =>
+                  match inspect(rec_reduct(k, e)) {
+                    MkSing(Ok(Some(r1)), er) =>
+                      match whnf_core_pc(k, r1, cheap_proj) {
+                        MkRedTo(r, p) => MkRedTo(r, RTrans(RRec(er), p))
+                      }
+                    MkSing(Ok(None), _) => MkRedTo(e, RRefl)
+                    MkSing(Err(err), _) => raise err
+                  }
+              }
+            No(_) => {
+              let pf2 : Red(k, get_app_fn(k, e), f) = red_rw_src(Id::sym(ef0), pf)
+              match whnf_core_pc(k, mk_app_n(k, f, get_app_args(k, e)), cheap_proj) {
+                MkRedTo(r, p) => MkRedTo(r, RTrans(RHead(pf2), p))
+              }
+            }
+          }
+      }
+  }
 }
 
 fn reduce_proj_core(k : K, idx : Int, s0 : Expr) -> Expr? raise KernelError {
@@ -611,9 +639,30 @@ fn reduce_proj_core(k : K, idx : Int, s0 : Expr) -> Expr? raise KernelError {
   }
 }
 
-fn reduce_proj(k : K, idx : Int, s : Expr, cheap_proj : Bool) -> Expr? raise KernelError {
-  let c = if cheap_proj { whnf_core_p(k, s, cheap_proj) } else { whnf(k, s) }
-  reduce_proj_core(k, idx, c)
+// a reduced projection: the structure `s` reduces to `c`, whose field `i` is `r`
+enum ProjRes : (K, Int, Expr) -> Type {
+  MkProjRes[k : K, i : Int, s : Expr](c : Expr, p : Red(k, s, c), r : Expr, e : proj_field(k, i, c) === Some(r)) : ProjRes(k, i, s)
+}
+
+fn reduce_proj_c(k : K, idx : Int, s : Expr, cheap_proj : Bool) -> ProjRes(k, idx, s)? raise KernelError {
+  let c0 = if cheap_proj { whnf_core_pc(k, s, cheap_proj) } else { whnf_c(k, s) }
+  let cr : RedTo(k, s) = match c0 {
+    MkRedTo(c, p) =>
+      match inspect(view(k, c)) {
+        MkSing(VStrLit(str), ev) =>
+          match whnf_c(k, str_lit_to_ctor(k, str)) {
+            MkRedTo(c1, p1) => MkRedTo(c1, RTrans(p, RTrans(RStrLit(ev), p1)))
+          }
+        MkSing(_, _) => MkRedTo(c, p)
+      }
+  }
+  match cr {
+    MkRedTo(c, p) =>
+      match inspect(proj_field(k, idx, c)) {
+        MkSing(Some(r), er) => Some(MkProjRes(c, p, r, er))
+        MkSing(None, _) => None
+      }
+  }
 }
 
 fn reduce_recursor(k : K, e : Expr) -> Expr? raise KernelError {
@@ -679,25 +728,34 @@ fn unfold_definition(k : K, e : Expr) -> Expr? {
 }
 
 fn whnf(k : K, e : Expr) -> Expr raise KernelError {
+  whnf_c(k, e).target()
+}
+
+// weak head normalization, with its derivation
+fn whnf_c(k : K, e : Expr) -> RedTo(k, e) raise KernelError {
   let kd = kind_of(k, e)
   if kd == K_BVAR || kd == K_SORT || kd == K_PI || kd == K_NAT || kd == K_STR {
-    return e
+    return MkRedTo(e, RRefl)
   }
   if kd == K_FVAR && not(is_let_fvar(k, e)) {
-    return e
+    return MkRedTo(e, RRefl)
   }
   bump(k, ST_WHNF)
   match k.tc.whnf_c.get(e) {
-    Some(r) => {
-      bump(k, ST_WHNF_HIT)
-      return r
-    }
+    Some(a) =>
+      match any_red_get(k, e, a) {
+        Some(r) => {
+          bump(k, ST_WHNF_HIT)
+          return r
+        }
+        None => ()
+      }
     None => ()
   }
   // a region: the nodes this call creates, but for the result, are garbage
   let mark = arena_size(k)
   let lmark = k.tc.log_len
-  let mut t = e
+  let mut cur : RedTo(k, e) = MkRedTo(e, RRefl)
   let mut fuel = WHNF_FUEL
   while true {
     if fuel <= 0 {
@@ -705,30 +763,50 @@ fn whnf(k : K, e : Expr) -> Expr raise KernelError {
     }
     fuel = fuel - 1
     if arena_size(k) - mark > GC_THRESHOLD {
-      t = gc_region(k, mark, lmark, t)
-    }
-    t = whnf_core(k, t)
-    match reduce_nat(k, t) {
-      Some(r) => {
-        t = r
-        break
+      cur = match cur {
+        MkRedTo(t, p) => MkRedTo(gc_region(k, mark, lmark, t), RTrans(p, RCopy))
       }
-      None => ()
     }
-    match unfold_definition(k, t) {
-      Some(r) => {
-        bump(k, ST_DELTA)
-        t = r
-      }
-      None => break
+    cur = match cur {
+      MkRedTo(t, p) =>
+        match whnf_core_pc(k, t, false) {
+          MkRedTo(t2, p2) => MkRedTo(t2, RTrans(p, p2))
+        }
+    }
+    let stop = match cur {
+      MkRedTo(t, p) =>
+        match reduce_nat_c(k, t) {
+          Some(MkRedTo(t2, p2)) => {
+            cur = MkRedTo(t2, RTrans(p, p2))
+            true
+          }
+          None =>
+            match inspect(unfold_definition(k, t)) {
+              MkSing(Some(t2), ed) => {
+                bump(k, ST_DELTA)
+                cur = MkRedTo(t2, RTrans(p, RDelta(ed)))
+                false
+              }
+              MkSing(None, _) => true
+            }
+        }
+    }
+    if stop {
+      break
     }
   }
   if arena_size(k) - mark > GC_THRESHOLD {
-    t = gc_region(k, mark, lmark, t)
+    cur = match cur {
+      MkRedTo(t, p) => MkRedTo(gc_region(k, mark, lmark, t), RTrans(p, RCopy))
+    }
   }
-  k.tc.whnf_c.set(e, t)
-  tc_log(k, C_WHNF, e, 0)
-  t
+  match cur {
+    MkRedTo(t, p) => {
+      k.tc.whnf_c.set(e, MkAnyRed(k, e, t, p))
+      tc_log(k, C_WHNF, e, 0)
+    }
+  }
+  cur
 }
 
 // ---- Nat and String literals ---------------------------------------------------------------
@@ -831,284 +909,64 @@ fn is_nat_bin_op(k : K, f : Name) -> Bool {
 }
 
 fn reduce_nat(k : K, e : Expr) -> Expr? raise KernelError {
-  if has_fvar(k, e) && not(k.tc.eager) {
-    // as Lean: literal arithmetic is only performed on closed terms
-    ()
+  match reduce_nat_c(k, e) {
+    Some(r) => Some(r.target())
+    None => None
   }
-  let nargs = get_app_num_args(k, e)
-  if nargs == 1 {
-    let f = app_fn(k, e)
-    if is_const_of(k, f, k.names.nat_succ) {
-      match nat_lit_value(k, whnf(k, app_arg(k, e))) {
-        Some(v) => return Some(mk_nat_lit(k, v + 1))
-        None => return None
-      }
-    }
-    None
-  } else if nargs == 2 {
-    let f = get_app_fn(k, e)
-    match const_name(k, f) {
-      Some(fname) =>
-        if is_nat_bin_op(k, fname) {
-          let a = app_arg(k, app_fn(k, e))
-          let b = app_arg(k, e)
-          match nat_lit_value(k, whnf(k, a)) {
-            Some(va) =>
-              match nat_lit_value(k, whnf(k, b)) {
-                Some(vb) => nat_bin_op(k, fname, va, vb)
-                None => None
+}
+
+// `Nat.succ` and the binary operations of `Nat` on literals, with derivations
+fn reduce_nat_c(k : K, e : Expr) -> RedTo(k, e)? raise KernelError {
+  match inspect(view(k, e)) {
+    MkSing(VApp(g, b), ev) =>
+      match reflect(is_const_of(k, g, k.names.nat_succ)) {
+        IsTrue(h) =>
+          match whnf_c(k, b) {
+            MkRedTo(lb, pb) =>
+              match inspect(nat_lit_value(k, lb)) {
+                MkSing(Some(v), elv) => Some(MkRedTo(mk_nat_lit(k, v + 1), RNatSucc(ev, h, pb, elv)))
+                MkSing(None, _) => None
               }
-            None => None
           }
-        } else {
-          None
-        }
-      None => None
-    }
-  } else {
-    None
+        IsFalse(_) =>
+          match inspect(view(k, g)) {
+            MkSing(VApp(f, a), eg) =>
+              match inspect(view(k, f)) {
+                MkSing(VConst(fname, _), ef) =>
+                  if is_nat_bin_op(k, fname) {
+                    match whnf_c(k, a) {
+                      MkRedTo(la, pa) =>
+                        match inspect(nat_lit_value(k, la)) {
+                          MkSing(Some(va), ea) =>
+                            match whnf_c(k, b) {
+                              MkRedTo(lb, pb) =>
+                                match inspect(nat_lit_value(k, lb)) {
+                                  MkSing(Some(vb), eb) =>
+                                    match inspect(nat_bin_op(k, fname, va, vb)) {
+                                      MkSing(Some(r), er) => Some(MkRedTo(r, RNatBin(ev, eg, ef, pa, pb, ea, eb, er)))
+                                      MkSing(None, _) => None
+                                    }
+                                  MkSing(None, _) => None
+                                }
+                            }
+                          MkSing(None, _) => None
+                        }
+                    }
+                  } else {
+                    None
+                  }
+                MkSing(_, _) => None
+              }
+            MkSing(_, _) => None
+          }
+      }
+    MkSing(_, _) => None
   }
 }
 
 // ---- definitional equality ---------------------------------------------------------------
 
-// The three-valued answer of the quick checks.
-enum LBool {
-  LTrue
-  LFalse
-  LUndef
-}
-
-fn to_lbool(k : K, b : Bool) -> LBool {
-  if b { LTrue } else { LFalse }
-}
-
-fn is_def_eq(k : K, t : Expr, s : Expr) -> Bool raise KernelError {
-  let r = is_def_eq_core(k, t, s)
-  if r {
-    uf_merge(k, t, s)
-  }
-  r
-}
-
-fn quick_is_def_eq(k : K, t : Expr, s : Expr) -> LBool raise KernelError {
-  if eqv_is_equiv(k, t, s) {
-    return LTrue
-  }
-  let kt = kind_of(k, t)
-  let ks = kind_of(k, s)
-  if kt == K_LAM && ks == K_LAM {
-    to_lbool(k, is_def_eq_binding(k, t, s, K_LAM))
-  } else if kt == K_PI && ks == K_PI {
-    to_lbool(k, is_def_eq_binding(k, t, s, K_PI))
-  } else if kt == K_SORT && ks == K_SORT {
-    to_lbool(k, level_equiv(sort_level(k, t), sort_level(k, s)))
-  } else if (kt == K_NAT && ks == K_NAT) || (kt == K_STR && ks == K_STR) {
-    // literals are interned: equal literals are the same node
-    LFalse
-  } else {
-    LUndef
-  }
-}
-
-// Two lambdas (or two pis): compare the domains and the bodies under a new
-// free variable, delaying the substitution.
-fn is_def_eq_binding(k : K, t0 : Expr, s0 : Expr, bk : Int) -> Bool raise KernelError {
-  let subst : Array[Expr] = Array::new()
-  let mut t = t0
-  let mut s = s0
-  while kind_of(k, t) == bk && kind_of(k, s) == bk {
-    let tdom = binding_domain(k, t)
-    let sdom = binding_domain(k, s)
-    let mut stype = -1
-    if tdom != sdom {
-      let st = instantiate_rev(k, sdom, subst)
-      let tt = instantiate_rev(k, tdom, subst)
-      if not(is_def_eq(k, tt, st)) {
-        return false
-      }
-      stype = st
-    }
-    let tb = binding_body(k, t)
-    let sb = binding_body(k, s)
-    if has_loose_bvars(k, tb) || has_loose_bvars(k, sb) {
-      if stype < 0 {
-        stype = instantiate_rev(k, sdom, subst)
-      }
-      subst.push(mk_local_decl(k, binding_name(k, s), stype))
-    } else {
-      // the variable does not occur: any placeholder will do
-      subst.push(mk_sort(k, Zero))
-    }
-    t = tb
-    s = sb
-  }
-  is_def_eq(k, instantiate_rev(k, t, subst), instantiate_rev(k, s, subst))
-}
-
-fn is_def_eq_args(k : K, t : Expr, s : Expr) -> Bool raise KernelError {
-  let mut a = t
-  let mut b = s
-  while is_app(k, a) && is_app(k, b) {
-    if not(is_def_eq(k, app_arg(k, a), app_arg(k, b))) {
-      return false
-    }
-    a = app_fn(k, a)
-    b = app_fn(k, b)
-  }
-  not(is_app(k, a)) && not(is_app(k, b))
-}
-
-fn try_eta_expansion_core(k : K, t : Expr, s : Expr) -> Bool raise KernelError {
-  if is_lam(k, t) && not(is_lam(k, s)) {
-    let st = whnf(k, infer_type(k, s))
-    match view(k, st) {
-      VPi(n, ty, _, bi) => is_def_eq(k, t, mk_lam(k, n, ty, mk_app(k, lift_loose_bvars(k, s, 0, 1), mk_bvar(k, 0)), bi))
-      _ => false
-    }
-  } else {
-    false
-  }
-}
-
-fn try_eta_expansion(k : K, t : Expr, s : Expr) -> Bool raise KernelError {
-  try_eta_expansion_core(k, t, s) || try_eta_expansion_core(k, s, t)
-}
-
-fn try_eta_struct_core(k : K, t : Expr, s : Expr) -> Bool raise KernelError {
-  let f = get_app_fn(k, s)
-  let fname = match const_name(k, f) {
-    Some(n) => n
-    None => return false
-  }
-  let cv = match env_find_ctor(k, fname) {
-    Some(v) => v
-    None => return false
-  }
-  if get_app_num_args(k, s) != cv.nparams + cv.nfields {
-    return false
-  }
-  if not(is_non_rec_structure(k, cv.induct)) {
-    return false
-  }
-  if not(is_def_eq(k, infer_type(k, t), infer_type(k, s))) {
-    return false
-  }
-  let args = get_app_args(k, s)
-  for i = cv.nparams; i < args.length(); i = i + 1 {
-    if not(is_def_eq(k, mk_proj(k, cv.induct, i - cv.nparams, t), args[i])) {
-      return false
-    }
-  }
-  true
-}
-
-fn try_eta_struct(k : K, t : Expr, s : Expr) -> Bool raise KernelError {
-  try_eta_struct_core(k, t, s) || try_eta_struct_core(k, s, t)
-}
-
-fn is_def_eq_app(k : K, t : Expr, s : Expr) -> Bool raise KernelError {
-  if not(is_app(k, t)) || not(is_app(k, s)) {
-    return false
-  }
-  let ta = get_app_args(k, t)
-  let sa = get_app_args(k, s)
-  if ta.length() != sa.length() {
-    return false
-  }
-  if not(is_def_eq(k, get_app_fn(k, t), get_app_fn(k, s))) {
-    return false
-  }
-  for i = 0; i < ta.length(); i = i + 1 {
-    if not(is_def_eq(k, ta[i], sa[i])) {
-      return false
-    }
-  }
-  true
-}
-
-fn is_def_eq_proof_irrel(k : K, t : Expr, s : Expr) -> LBool raise KernelError {
-  let tt = infer_type(k, t)
-  if not(is_prop(k, tt)) {
-    return LUndef
-  }
-  to_lbool(k, is_def_eq(k, tt, infer_type(k, s)))
-}
-
-fn failure_key(k : K, t : Expr, s : Expr) -> (Int, Int) {
-  if t <= s { (t, s) } else { (s, t) }
-}
-
-fn try_unfold_proj_app(k : K, e : Expr) -> Expr? raise KernelError {
-  let f = get_app_fn(k, e)
-  if kind_of(k, f) != K_PROJ {
-    return None
-  }
-  let e2 = whnf_core(k, e)
-  if e2 != e { Some(e2) } else { None }
-}
-
-enum Reduction {
-  RContinue(Expr, Expr)
-  RUnknown(Expr, Expr)
-  RTrue
-  RFalse(Expr, Expr)
-}
-
-fn delta_step(k : K, e : Expr) -> Expr raise KernelError {
-  match unfold_definition(k, e) {
-    Some(r) => whnf_core_p(k, r, true)
-    None => kfail("internal: delta on a non-definition")
-  }
-}
-
-fn lazy_delta_cont(k : K, tn : Expr, sn : Expr) -> Reduction raise KernelError {
-  match quick_is_def_eq(k, tn, sn) {
-    LUndef => RContinue(tn, sn)
-    LTrue => RTrue
-    LFalse => RFalse(tn, sn)
-  }
-}
-
-fn lazy_delta_reduction_step(k : K, tn : Expr, sn : Expr) -> Reduction raise KernelError {
-  let dt = is_delta(k, tn)
-  let ds = is_delta(k, sn)
-  match (dt, ds) {
-    (None, None) => RUnknown(tn, sn)
-    (Some(_), None) =>
-      match try_unfold_proj_app(k, sn) {
-        Some(sn2) => lazy_delta_cont(k, tn, sn2)
-        None => lazy_delta_cont(k, delta_step(k, tn), sn)
-      }
-    (None, Some(_)) =>
-      match try_unfold_proj_app(k, tn) {
-        Some(tn2) => lazy_delta_cont(k, tn2, sn)
-        None => lazy_delta_cont(k, tn, delta_step(k, sn))
-      }
-    (Some(ct), Some(cs)) => {
-      let ht = ct.hints(k)
-      let hs = cs.hints(k)
-      if hints_lt(ht, hs) {
-        lazy_delta_cont(k, tn, delta_step(k, sn))
-      } else if hints_lt(hs, ht) {
-        lazy_delta_cont(k, delta_step(k, tn), sn)
-      } else {
-        if is_app(k, tn) && is_app(k, sn) && ct.name == cs.name && hints_is_regular(ht) &&
-          not(k.tc.failure.contains(failure_key(k, tn, sn))) {
-          if level_list_equiv(const_levels(k, get_app_fn(k, tn)), const_levels(k, get_app_fn(k, sn))) {
-            if is_def_eq_args(k, tn, sn) {
-              return RTrue
-            }
-          }
-          let fk = failure_key(k, tn, sn)
-          k.tc.failure.set(fk, true)
-          tc_log(k, C_FAILURE, fk.0, fk.1)
-        }
-        lazy_delta_cont(k, delta_step(k, tn), delta_step(k, sn))
-      }
-    }
-  }
-}
+// definitional equality is in `defeq.mbtpp`
 
 fn is_nat_zero(k : K, t : Expr) -> Bool {
   match nat_lit_value(k, t) {
@@ -1123,196 +981,6 @@ fn is_nat_succ_of(k : K, t : Expr) -> Expr? {
     VApp(f, a) => if is_const_of(k, f, k.names.nat_succ) { Some(a) } else { None }
     _ => None
   }
-}
-
-fn is_def_eq_offset(k : K, t : Expr, s : Expr) -> LBool raise KernelError {
-  if is_nat_zero(k, t) && is_nat_zero(k, s) {
-    return LTrue
-  }
-  match (is_nat_succ_of(k, t), is_nat_succ_of(k, s)) {
-    (Some(t2), Some(s2)) => to_lbool(k, is_def_eq_core(k, t2, s2))
-    _ => LUndef
-  }
-}
-
-fn lazy_delta_reduction(k : K, tn0 : Expr, sn0 : Expr) -> Reduction raise KernelError {
-  let mut tn = tn0
-  let mut sn = sn0
-  let mut fuel = LAZY_FUEL
-  while true {
-    if fuel <= 0 {
-      kfail("deterministic timeout (lazy delta)")
-    }
-    fuel = fuel - 1
-    match is_def_eq_offset(k, tn, sn) {
-      LTrue => return RTrue
-      LFalse => return RFalse(tn, sn)
-      LUndef => ()
-    }
-    if (not(has_fvar(k, tn)) && not(has_fvar(k, sn))) || k.tc.eager {
-      match reduce_nat(k, tn) {
-        Some(t2) => return if is_def_eq_core(k, t2, sn) { RTrue } else { RFalse(t2, sn) }
-        None =>
-          match reduce_nat(k, sn) {
-            Some(s2) => return if is_def_eq_core(k, tn, s2) { RTrue } else { RFalse(tn, s2) }
-            None => ()
-          }
-      }
-    }
-    match lazy_delta_reduction_step(k, tn, sn) {
-      RContinue(t2, s2) => {
-        tn = t2
-        sn = s2
-      }
-      r => return r
-    }
-  }
-  RUnknown(tn, sn)
-}
-
-fn lazy_delta_proj_reduction(k : K, t0 : Expr, s0 : Expr, idx : Int) -> Bool raise KernelError {
-  let mut tn = t0
-  let mut sn = s0
-  let mut fuel = LAZY_FUEL
-  while true {
-    if fuel <= 0 {
-      kfail("deterministic timeout (lazy delta proj)")
-    }
-    fuel = fuel - 1
-    match lazy_delta_reduction_step(k, tn, sn) {
-      RContinue(t2, s2) => {
-        tn = t2
-        sn = s2
-      }
-      RTrue => return true
-      RUnknown(t2, s2) | RFalse(t2, s2) => {
-        tn = t2
-        sn = s2
-        break
-      }
-    }
-  }
-  match reduce_proj_core(k, idx, tn) {
-    Some(tf) =>
-      match reduce_proj_core(k, idx, sn) {
-        Some(sf) => return is_def_eq_core(k, tf, sf)
-        None => ()
-      }
-    None => ()
-  }
-  is_def_eq_core(k, tn, sn)
-}
-
-fn try_string_lit_expansion_core(k : K, t : Expr, s : Expr) -> LBool raise KernelError {
-  match view(k, t) {
-    VStrLit(str) =>
-      if is_app(k, s) && is_const_of(k, app_fn(k, s), k.names.string_of_list) {
-        to_lbool(k, is_def_eq_core(k, str_lit_to_ctor(k, str), s))
-      } else {
-        LUndef
-      }
-    _ => LUndef
-  }
-}
-
-fn try_string_lit_expansion(k : K, t : Expr, s : Expr) -> LBool raise KernelError {
-  match try_string_lit_expansion_core(k, t, s) {
-    LUndef => try_string_lit_expansion_core(k, s, t)
-    r => r
-  }
-}
-
-fn is_def_eq_unit_like(k : K, t : Expr, s : Expr) -> Bool raise KernelError {
-  let ttype = whnf(k, infer_type(k, t))
-  match const_name(k, get_app_fn(k, ttype)) {
-    Some(i) =>
-      match env_find_induct(k, i) {
-        Some(iv) =>
-          if iv.is_rec || iv.nindices != 0 {
-            false
-          } else {
-            match iv.ctors {
-              Cons(c, Nil) =>
-                match env_find_ctor(k, c) {
-                  Some(cv) => cv.nfields == 0 && is_def_eq_core(k, ttype, infer_type(k, s))
-                  None => false
-                }
-              _ => false
-            }
-          }
-        None => false
-      }
-    None => false
-  }
-}
-
-fn is_def_eq_core(k : K, t : Expr, s : Expr) -> Bool raise KernelError {
-  bump(k, ST_DEFEQ)
-  match quick_is_def_eq(k, t, s) {
-    LTrue => return true
-    LFalse => return false
-    LUndef => ()
-  }
-  if (not(has_fvar(k, t)) || k.tc.eager) && is_const_of(k, s, k.names.bool_true) {
-    if is_const_of(k, whnf(k, t), k.names.bool_true) {
-      return true
-    }
-  }
-  let tn = whnf_core_p(k, t, true)
-  let sn = whnf_core_p(k, s, true)
-  if tn != t || sn != s {
-    match quick_is_def_eq(k, tn, sn) {
-      LTrue => return true
-      LFalse => return false
-      LUndef => ()
-    }
-  }
-  match is_def_eq_proof_irrel(k, tn, sn) {
-    LTrue => return true
-    LFalse => return false
-    LUndef => ()
-  }
-  let (tn, sn) = match lazy_delta_reduction(k, tn, sn) {
-    RTrue => return true
-    RFalse(_, _) => return false
-    RContinue(a, b) => (a, b)
-    RUnknown(a, b) => (a, b)
-  }
-  match (view(k, tn), view(k, sn)) {
-    (VConst(tf, tl), VConst(sf, sl)) =>
-      if tf == sf && level_list_equiv(tl, sl) {
-        return true
-      }
-    (VFVar(a), VFVar(b)) => if a == b { return true }
-    (VProj(_, ti, te), VProj(_, si, se)) =>
-      if ti == si && lazy_delta_proj_reduction(k, te, se, ti) {
-        return true
-      }
-    _ => ()
-  }
-  let tnn = whnf_core(k, tn)
-  let snn = whnf_core(k, sn)
-  if tnn != tn || snn != sn {
-    return is_def_eq_core(k, tnn, snn)
-  }
-  if is_def_eq_app(k, tn, sn) {
-    return true
-  }
-  if try_eta_expansion(k, tn, sn) {
-    return true
-  }
-  if try_eta_struct(k, tn, sn) {
-    return true
-  }
-  match try_string_lit_expansion(k, tn, sn) {
-    LTrue => return true
-    LFalse => return false
-    LUndef => ()
-  }
-  if is_def_eq_unit_like(k, tn, sn) {
-    return true
-  }
-  false
 }
 
 // ---- quotients ---------------------------------------------------------------------------

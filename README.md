@@ -18,8 +18,9 @@ and checks every declaration. The algorithms follow
   literals are implemented. See the test report below.
 - **Part of it carries proofs, which are not a formal verification.** The
   universe level operations the kernel uses are proved correct against a
-  semantics of levels (see [About the proofs](#about-the-proofs)). The rest
-  of the kernel has no proofs yet.
+  semantics of levels, and weak head normalization and definitional equality
+  return certificates (see [About the proofs](#about-the-proofs)). Type
+  inference and the checks of declarations have no proofs yet.
 - Unsafe inductive types are rejected (not supported). Partial definitions
   are checked like safe ones; safe declarations may not use unsafe or partial
   ones.
@@ -61,9 +62,31 @@ definitions of Lean's core library for `Nat.add`, `Nat.sub`, `Nat.mul`,
 `Nat.pow`, `Nat.beq` and `Nat.ble`. `Nat.div`, `Nat.mod`, `Nat.gcd` and the
 bitwise operations are not covered.
 
-The proofs are erased when compiling, so they cost nothing at run time. They
-rely on the axioms of the MoonBit++ Prelude for the primitive equalities
-(`String::deq`, `Int::deq`).
+Certificates, in [`src/main/judgment.mbtpp`](src/main/judgment.mbtpp) (the
+rules) and [`src/main/defeq.mbtpp`](src/main/defeq.mbtpp):
+
+- `whnf` returns its result `r` together with a derivation of `Red(k, e, r)`:
+  `e` reduces to `r` by the kernel's reduction steps (β, ζ, δ, let-bound
+  variables, projections, Nat literals, string literals);
+- `is_def_eq` returns, whenever it answers *equal*, a derivation of
+  `DefEq(k, t, s)` by the rules of the algorithm (congruence, binders compared
+  under a fresh variable, sorts by the proved level equivalence, η, structure
+  η, proof irrelevance, unit-like types, Nat literals); the union-find cache
+  and the other caches store derivations too.
+
+A certificate shows that the answer follows from the rules; it does not show
+that the rules are those of Lean's type theory, nor that the primitives used
+in them are correct. Trusted, as primitives: the arena operations (`view`,
+`instantiate`, `mk_*`), the environment and the local context, unfolding a
+definition, the field of a constructor application. Trusted, as single
+rules for now: recursor and quotient reduction (`RRec`), type inference
+where definitional equality uses it (η, structure η, proof irrelevance,
+unit-like types), and garbage collection keeping the terms in use (`RCopy`).
+
+The proofs are erased when compiling, so they cost nothing at run time
+(building the certified results costs some allocations). They rely on the
+axioms of the MoonBit++ Prelude for the primitive equalities (`String::deq`,
+`Int::deq`) and for pointer equality (`ptr_deq`).
 
 ## Requirements
 
@@ -111,9 +134,11 @@ rejected.
 | `src/main/name.mbtpp`, `level.mbtpp` | names; universe levels |
 | `src/main/level_proof.mbtpp` | the semantics of levels; the decision procedure for `≤` and the other level operations, with proofs |
 | `src/main/nat_proof.mbtpp` | Lean's definitions of the accelerated Nat operations, proved equal to the ones the kernel uses |
+| `src/main/judgment.mbtpp` | the judgments `Red` and `DefEq` the kernel's answers are certified with |
+| `src/main/defeq.mbtpp` | definitional equality, certified |
 | `src/main/expr.mbtpp` | expressions, hash-consed in an arena (equality and caches are O(1)); substitution; region-based collection |
 | `src/main/env.mbtpp` | declarations, environment, local context |
-| `src/main/tc.mbtpp` | type inference, whnf, definitional equality, literals, quotient and recursor reduction |
+| `src/main/tc.mbtpp` | type inference, whnf (certified), literals, quotient and recursor reduction |
 | `src/main/inductive.mbtpp` | inductive types: checks, recursor generation, nested inductives |
 | `src/main/decl.mbtpp` | checking declarations; quotients |
 | `src/main/loader.mbtpp` | replaying an export file |
@@ -133,16 +158,16 @@ not finish within 60 s.
 
 | Category | Passed | Total | Time (s) |
 | --- | --- | --- | --- |
-| `bad/bugs` | 26 | 26 | 10.0 |
-| `bad/other` | 5 | 5 | 1.7 |
-| `bad/perf` | 2 | 2 | 0.9 |
-| `bad/tutorial` | 47 | 47 | 12.0 |
+| `bad/bugs` | 26 | 26 | 8.8 |
+| `bad/other` | 5 | 5 | 1.5 |
+| `bad/perf` | 2 | 2 | 1.2 |
+| `bad/tutorial` | 47 | 47 | 13.7 |
 | `good/corner-cases` | 1 | 1 | 0.3 |
 | `good/init-prelude.ndjson` | 1 | 1 | 1.5 |
-| `good/other` | 5 | 5 | 1.3 |
-| `good/perf` | 22 | 26 | 336.3 |
-| `good/tutorial` | 94 | 94 | 43.6 |
-| **Total** | **203** | **207** | 407.6 |
+| `good/other` | 5 | 5 | 1.5 |
+| `good/perf` | 22 | 26 | 320.6 |
+| `good/tutorial` | 94 | 94 | 27.5 |
+| **Total** | **203** | **207** | 376.6 |
 
 Failures (all timeouts at 60 s):
 
@@ -153,8 +178,8 @@ Failures (all timeouts at 60 s):
 | `good/perf/magma-list-deep-n36` | not tried beyond 60 s |
 | `good/perf/magma-list-pair-n21` | not finished within 400 s |
 
-The slowest tests that pass: `magma-list-pair-n7` 53.0 s, `beta-ladder`
-14.7 s, `grind-ring-5` 11.4 s, `let-ladder` 6.0 s; every other test takes
+The slowest tests that pass: `magma-list-pair-n7` 42.5 s, `beta-ladder`
+12.9 s, `grind-ring-5` 11.2 s, `let-ladder` 5.6 s; every other test takes
 under 2 s (`init-prelude`: 1.5 s).
 
 The `magma-list` tests check a `decide` proof that enumerates a magma
